@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="W4kmBxfiSnXcnLqEHTZtCE">
+<head data-page-node-id="hNwYSmwAcjvskfIjPeJRqK">
+  <meta charset="UTF-8" data-page-node-id="fX9i3q05JtHpfnfkGksAV1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="HIWExaoVODHIYeh965YuPu" />
+  <title>利润分析平台 · Profit Insight</title>
+  <link rel="icon" href="data:," data-page-node-id="ODsCeRVOd5GWzJwhBDD2qt" />
+  <link rel="stylesheet" href="css/style.css" data-page-node-id="fkNoK2RXQSBYPkzheiyjYe" />
+  <script src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body data-page-node-id="YpcmB3BzO6tTBL7jtOFo40">
+  <!-- 登录视图 -->
+  <section id="login-view" class="login-view" data-page-node-id="d0b5XD3HyJsYY46rE50vjp">
+    <div class="login-card" data-page-node-id="fK3RGl7ANKmkBQHefd8t6V">
+      <div class="brand-mark" data-page-node-id="45xS2YloydGGxkPJFGIBOc">P</div>
+      <h1 data-page-node-id="7iq85gHaqmuXvJ2vL0oAol">利润分析平台</h1>
+      <p class="login-sub" data-page-node-id="IfDxndJ4yI1EiaGJzRbBFT">多人协同 · 四大模块独立运作的利润经营分析工作台</p>
+      <div id="login-error" class="alert error hidden" data-page-node-id="WPBdOsHMJ5vYtUFs4FgqAk"></div>
+
+      <div class="login-tabs" data-page-node-id="gSQP6cUmSBzs55HZJBjGuM">
+        <button class="tab active" data-tab="phone" data-page-node-id="qSCXjXWeQKHLBj5xWxXG9Q">手机号登录</button>
+        <button class="tab" data-tab="wechat" data-page-node-id="unuU05BYISeQq4R5I6lwBC">微信登录</button>
+      </div>
+
+      <div id="tab-phone" class="tab-panel" data-page-node-id="dv0AGnJHAdslbDDMVuVnlR">
+        <label data-page-node-id="8Ua6bkSeJeCHB99G3zjHnx">手机号</label>
+        <input id="phone" type="tel" maxlength="11" placeholder="请输入 11 位手机号" autocomplete="tel" data-page-node-id="6FgIL3NAgWyAH7iCVNaJDH" />
+        <div id="phone-error" class="field-error" data-page-node-id="WJPY4Y0OTNSSSLoN1fegzt"></div>
+        <label data-page-node-id="ki53De4fpo35VIh2J7pfu0">验证码</label>
+        <div class="code-row" data-page-node-id="sxwD4mYCYviXRnQq1lLhOk">
+          <input id="phone-code" type="text" maxlength="6" placeholder="验证码" autocomplete="one-time-code" data-page-node-id="R4CexLFkXd7rOZEPZN3KP6" />
+          <button id="send-code" type="button" class="btn ghost" data-page-node-id="DpRj49Q4G8Fc9gbgiRqVBs">获取验证码</button>
+        </div>
+        <button id="phone-login" type="button" class="btn primary block" data-page-node-id="Fi07qoVg6EB72pXm0lA1bb">登录 / 注册</button>
+        <p class="hint" data-page-node-id="lhHTuacRyF09ABxOla7evU">未注册手机号将在验证后自动创建账号</p>
+      </div>
+
+      <div id="tab-wechat" class="tab-panel hidden" data-page-node-id="U5HH0o2IzpZiP6gOHtt8eZ">
+        <p class="hint" data-page-node-id="dngc8ZJUZQG75nymMqYVR1">通过微信授权登录，使用已绑定的 WorkBuddy 身份进入协作空间。</p>
+        <button id="wechat-login" type="button" class="btn primary block" data-page-node-id="MX7ZKaxGe4wy0sWCjpVUmb">微信授权登录</button>
+        <p class="hint" data-page-node-id="YmZKu8S5Vivx8O2pkC8THr">网页授权需在已发布的 HTTPS 域名下完成</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 主应用 -->
+  <div id="app-view" class="app-shell hidden" data-page-node-id="cU9wIqDTQ6cpao3Em5CcZI">
+    <header class="topbar" data-page-node-id="rI4DfaX0qiJn6Gv6SxBfKf">
+      <div class="topbar-left" data-page-node-id="IAEqM4hm56PsWZIrXSQasB">
+        <div class="logo" data-page-node-id="lbQPVAyMgsJHCFK80bGUq0">P</div>
+        <div class="product-name" data-page-node-id="rm9eTWnltLvpzbwKLM0UIx">利润分析平台<span data-page-node-id="18WHVhtiIEX7E4nTUClP5X">Profit Insight</span></div>
+      </div>
+      <div class="workspace-bar" data-page-node-id="YGF2ZeJMGwus9DkrlXqXx7">
+        <span class="ws-label" data-page-node-id="UqVppACMSmVgspWIJ2ipFL">协作空间</span>
+        <select id="workspace-select" aria-label="选择协作空间" data-page-node-id="hMeKC8wlU18aQCfnnFQfGr"></select>
+        <button id="workspace-new" class="btn tiny ghost" type="button" data-page-node-id="hEbKaqaJ9Uri3WPpkatSJI">新建</button>
+        <button id="workspace-members" class="btn tiny ghost" type="button" data-page-node-id="wLQzizhHQgFrPaFBPb4BnN">成员协作</button>
+      </div>
+      <div class="topbar-right" data-page-node-id="Hd6lHiXgHPSj57X7NgtYfy">
+        <span id="user-name" class="user-name" data-page-node-id="jNAqISD8cDt5uGBviZfRWG"></span>
+        <button id="copy-uid" class="btn tiny ghost" type="button" title="复制我的用户 ID，供空间管理员邀请" data-page-node-id="1hSfbF7RuNBLgAt9bd3O8Q">复制我的 ID</button>
+        <button id="logout" class="btn tiny ghost" type="button" data-page-node-id="rwDah506p3dVfc4Sdziod5">退出</button>
+      </div>
+    </header>
+
+    <div class="body-layout" data-page-node-id="cmGmw6UxV89YcWSRC221DE">
+      <aside class="sidebar" data-page-node-id="AbPxs7zoUubWlbHciPEzjO">
+        <div class="nav-caption" data-page-node-id="DRVCipKQRcLwtf9c2f9QBS">工作模块</div>
+        <nav id="module-nav" data-page-node-id="zlwR4OWSk7ZZ5ZfjWwjmhl">
+          <button class="nav-item active" data-module="m1" data-page-node-id="zBbMBsHYgceNLrS0AYm780"><span class="nav-icon" data-page-node-id="qGXQR1M0XJl6e5eyVPMTwi">①</span><span data-page-node-id="Atzup1841HlynqBk7am0fD"><b data-page-node-id="sPUWmCjruc49JFL8HsxJx2">M1 数据导入</b><small data-page-node-id="J3PJeJ9jvUi231eScmDgtt">清洗 · 模板 · 入库</small></span><i class="dot" data-page-node-id="DQgqi9ejPkT9CxVabBAIw6"></i></button>
+          <button class="nav-item" data-module="m2" data-page-node-id="AGuebBTFEswd8mtMejcNNn"><span class="nav-icon" data-page-node-id="ItQwzwed1llyIkuuTF28OH">②</span><span data-page-node-id="0hTOc0s3aFM8UVMaYeAX1t"><b data-page-node-id="03I2D2rqGwJR8yB7oedemA">M2 智能问数</b><small data-page-node-id="3fJa7b8v0RTQBeQJe9alDX">Text to SQL · 归因</small></span><i class="dot" data-page-node-id="7zCT4rP6iXSmCMfTiVz6Bl"></i></button>
+          <button class="nav-item" data-module="m3" data-page-node-id="K8BwUsZdG6953UC5QvQtAq"><span class="nav-icon" data-page-node-id="ctGP2L3SdqantTEV3PJ7ld">③</span><span data-page-node-id="sV6COwtTNUFWhfjGE9Ffgy"><b data-page-node-id="BoUvBJcwr2buPR2Hlz3XUK">M3 数据看板</b><small data-page-node-id="A61ltUCcGwfykRC0RGS0n8">图表 · 筛选 · 布局</small></span><i class="dot" data-page-node-id="3xbRIxmoo66DxU5JBcDqvA"></i></button>
+          <button class="nav-item" data-module="m4" data-page-node-id="MkDh2NdDhquOnxTtwdGMJE"><span class="nav-icon" data-page-node-id="Y8dCmIUAbdx34s2ogGfP2u">④</span><span data-page-node-id="W2LocRfou1391i1rvEEwmJ"><b data-page-node-id="MKwT6x0PWoEtPGhJhJPRWv">M4 信息推送</b><small data-page-node-id="iIeKbiCGJ8a9abrzlXLDm9">变化触发 · 定时</small></span><i class="dot" data-page-node-id="ptxW8B8HssWxEWDqicKgLT"></i></button>
+        </nav>
+        <div class="sidebar-foot" data-page-node-id="a8n7QtH729ygN6s8bVvFQf">
+          <div class="side-card" data-page-node-id="8EMOZ2bhJtbNbqLMSLYtkX">
+            <b id="side-ws-name" data-page-node-id="EN4mJItg5HEsf5LtkF6vK6">未选择空间</b>
+            <span id="side-role" data-page-node-id="AYMbPQwDZJd6r2udRPF8qJ">—</span>
+          </div>
+          <p data-page-node-id="h9Le0FlQOCB3soXdDgRT55">四个模块共享空间与数据契约，页面与状态彼此独立。</p>
+        </div>
+      </aside>
+
+      <main class="main-area" data-page-node-id="dwh62QFBHmsS4u3fHUARsg">
+        <div id="module-header" class="module-header" data-page-node-id="dCBYqC3UjHCjpRmDVX1MCS"></div>
+        <div id="module-root" class="module-root" data-page-node-id="MaKiuzgx1tOo74YIFuZqu9"></div>
+      </main>
+    </div>
+  </div>
+
+  <div id="toast-wrap" class="toast-wrap" data-page-node-id="rxuKZyHY2ZscZr9LRsO5CB"></div>
+  <div id="modal-root" class="modal-root hidden" data-page-node-id="pG35joaJOHLmMWc7ZGwHvc"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/modules/m1.js"></script>
+  <script src="js/modules/m2.js"></script>
+  <script src="js/modules/m3.js"></script>
+  <script src="js/modules/m4.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
