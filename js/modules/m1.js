@@ -15,6 +15,7 @@
   let cleaned = null;
   let override = null;
   let fileName = '';
+  let wideMeta = null;
 
   const TEMPLATE_HEADERS = () => window.PA_TEMPLATE_HEADERS || ['月份','数据类型','站点/国家','平台','渠道','素材来源','品牌','品类','报表产品','科目','金额'];
   const LABEL = () => window.PA_DIM_LABELS || {};
@@ -30,9 +31,10 @@
     return '<div class="card"><div class="card-title"><h3>导入流程</h3><span class="sub">管报模板 → 清洗 → 校验 → 入库</span></div>' +
       '<div class="stepper"><div class="step active">1 · 选择文件</div><div class="step">2 · 字段与清洗</div><div class="step">3 · 预览入库</div></div>' +
       '<div class="dropzone" id="dropzone"><div class="big">⇪</div><b>拖入或选择预算 / 实际 / 预测数据文件</b>' +
-      '<p class="muted tiny-text">支持 CSV、XLSX、XLS；首行为表头；按管报主数据模板：' + TEMPLATE_HEADERS().join(' / ') + '</p>' +
+      '<p class="muted tiny-text">支持 CSV、XLSX、XLS；首行为表头。支持两种版式：<b>宽表</b>（科目编码作列头，一行一个维度组合，推荐）与 <b>长表</b>（科目编码占一列，一行一个科目）。上传时自动识别，无需手工调整。</p>' +
       '<div class="row" style="justify-content:center"><button class="btn primary" id="pick-file">选择文件</button>' +
-      '<button class="btn" id="download-template">下载管报模板</button><button class="btn" id="download-codes">科目编码表</button>' +
+      '<button class="btn" id="download-wide-template">下载宽表模板（科目横排）</button>' +
+      '<button class="btn" id="download-template">下载长表模板</button><button class="btn" id="download-codes">科目编码表</button>' +
       '<button class="btn" id="view-master">查看主数据字典</button>' +
       '<button class="btn" id="load-sample">载入示例数据</button></div></div>' +
       '<input type="file" id="file-input" accept=".csv,.xlsx,.xls" class="hidden" />' +
@@ -73,6 +75,7 @@
     ['dragleave', 'drop'].forEach((ev) => zone.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.remove('drag'); }));
     zone.addEventListener('drop', (e) => { if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
 
+    P.qs('#download-wide-template', root).onclick = downloadWideTemplate;
     P.qs('#download-template', root).onclick = downloadTemplate;
     P.qs('#download-codes', root).onclick = downloadSubjectCodes;
     P.qs('#load-sample', root).onclick = loadSample;
@@ -100,13 +103,24 @@
       const wb = XLSX.read(buf, { type: 'array', cellDates: true });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
-      if (rows.length > 5001) { P.toast('数据超过 5000 行，请先拆分', 'error'); return; }
-      rawRows = rows;
+      if (rows.length > 5001) { P.toast('源文件超过 5000 行，请先拆分', 'error'); return; }
+      /* 自动识别「科目横排」宽表：把科目列逆透视回系统内部长表。
+         源文件行数按 5000 校验；展开后的内部行数不受此限（仅用于 M2/M3/M4 聚合）。 */
+      const wide = P.detectWide(rows);
+      wideMeta = null;
+      if (wide) {
+        const ex = P.expandWideRows(rows, wide);
+        rawRows = ex.rows;
+        wideMeta = { subjects: wide.subjectCols.map((c) => c.subject), expanded: ex.count, sourceRows: rows.length - 1 };
+      } else {
+        rawRows = rows;
+      }
       fileName = file.name;
       override = null;
       cleaned = P.cleanRows(rawRows);
       render(currentRoot);
-      P.toast('已读取 ' + (rows.length - 1) + ' 行，请确认清洗结果', 'ok');
+      if (wide) P.toast('宽表已展开：' + wideMeta.subjects.length + ' 个科目 × ' + wideMeta.sourceRows + ' 行 → ' + wideMeta.expanded + ' 条明细，请确认', 'ok');
+      else P.toast('已读取 ' + (rows.length - 1) + ' 行，请确认清洗结果', 'ok');
     } catch (e) { P.toast('文件解析失败：' + e.message, 'error'); }
   }
 
@@ -118,6 +132,7 @@
       : r[map[h]])));
     fileName = '管报示例数据.csv';
     override = null;
+    wideMeta = null;
     cleaned = P.cleanRows(rawRows);
     render(currentRoot);
     P.toast('管报示例数据已载入（科目以编码导入、自动转名称），可直接入库', 'ok');
@@ -135,6 +150,30 @@
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     a.download = '管报数据导入模板.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  /* 宽表模板：科目编码作列头，一行代表一个维度组合，金额填在各科目列下。
+     行数不含科目维度，源表可控制在 5000 行内；上传后自动展开为内部长表。 */
+  function downloadWideTemplate() {
+    const base = ['月份','数据类型','站点/国家','平台','渠道','素材来源','品牌','品类','报表产品'];
+    const def = (window.PA_DICT.dimensions || []).find((d) => d.key === 'subject') || {};
+    const values = def.values || [];
+    const codes = def.codes || [];
+    const subCols = values.map((v, i) => {
+      const code = codes[i] || P.subjectNameToCode(v) || v;
+      return code + '(' + v + ')';
+    });
+    const headers = base.concat(subCols);
+    const dim = ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫'];
+    const rowA = dim.concat(subCols.map((h, i) => i === 2 ? 1280000 : (i === 7 ? 842000 : '')));
+    const rowB = ['2月','实际数','MY','Shopee','Shopee货架销售','自播','GMEELAN','清洁','去角质啫喱'].concat(subCols.map((h, i) => i === 2 ? 960000 : (i === 7 ? 672000 : '')));
+    const rows = [headers, rowA, rowB];
+    const csv = '\ufeff' + rows.map((r) => r.map((c) => String(c == null ? '' : c).indexOf(',') >= 0 ? '"' + c + '"' : c).join(',')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = '管报数据导入模板_宽表_科目横排.csv';
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
@@ -181,8 +220,13 @@
     const reverse = {};
     Object.entries(cleaned.mapping).forEach(([h, k]) => { reverse[k] = h; });
     const headers = (rawRows && rawRows[0]) || [];
+    const wideNotice = wideMeta
+      ? '<div class="alert ok">已识别为<b>科目横排宽表</b>：' + wideMeta.subjects.length + ' 个科目列（' + P.h(wideMeta.subjects.slice(0, 6).join('、')) + (wideMeta.subjects.length > 6 ? '…' : '') +
+        '） × ' + wideMeta.sourceRows + ' 行 → 自动展开为 ' + wideMeta.expanded + ' 条明细。源表行数已满足上限，展开在内部完成，不影响下游模块。</div>'
+      : '';
     box.innerHTML = '<div class="card-title" style="margin-top:18px"><h3>字段映射与清洗结果</h3><span class="sub">' +
       P.h(fileName) + ' · ' + cleaned.rows.length + ' 行有效数据</span></div>' +
+      wideNotice +
       (cleaned.issues.length ? '<div class="alert info">' + cleaned.issues.map((x) => P.h(x)).join('<br>') + '</div>' : '<div class="alert ok">字段识别完整，未发现明显异常</div>') +
       '<div class="map-grid">' + VIEW_FIELDS.map(([key, label]) => {
         const opts = ['<option value="">— 不导入 —</option>'].concat(headers.map((h, i) =>
@@ -209,7 +253,7 @@
       cleaned = P.cleanRows(rawRows, override);
       renderPreview(root);
     });
-    P.qs('#cancel-import', box).onclick = () => { rawRows = null; cleaned = null; override = null; render(root); };
+    P.qs('#cancel-import', box).onclick = () => { rawRows = null; cleaned = null; override = null; wideMeta = null; render(root); };
     P.qs('#do-import', box).onclick = async () => {
       if (!cleaned.rows.length) { P.toast('没有可导入的数据', 'error'); return; }
       const btn = P.qs('#do-import', box);
@@ -229,7 +273,7 @@
           source_file: fileName,
           validation_json: { issues: cleaned.issues, summary: s }
         });
-        rawRows = null; cleaned = null; override = null;
+        rawRows = null; cleaned = null; override = null; wideMeta = null;
         await refreshDatasets();
         P.toast('导入完成，M2/M3/M4 已可读取', 'ok');
       } catch (e) { P.toast('导入失败：' + e.message, 'error'); btn.disabled = false; btn.textContent = '确认入库'; }

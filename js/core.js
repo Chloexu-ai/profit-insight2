@@ -485,6 +485,73 @@
     if (role === 'budget' && isCost && !found.has('budget_cost')) row.budget_cost += amount;
   }
 
+  /* ---------------- 宽表（科目横排）识别与展开 ----------------
+   * 长表：科目占一列、每个科目一行（维度 × 科目 交叉，行数膨胀）。
+   * 宽表：科目编码作列头、每个维度组合一行（行数不含科目维度，显著变小）。
+   * 上传时自动识别宽表并「逆透视」展开为内部长表，M2/M3/M4 完全无感知。 */
+  const WIDE_NUM_KEYS = ['amount', 'revenue', 'cost', 'budget', 'budget_cost'];
+
+  /* 列头能否对应到一个科目（编码优先，科目标准名兼容）；返回科目标准名或 null */
+  P.subjectHeaderName = function (header) {
+    const s = String(header == null ? '' : header).trim();
+    if (!s) return null;
+    const def = subjectDef();
+    const codeToName = (code) => {
+      if (!code) return null;
+      if (def.aliasesMap) { const v = def.aliasesMap[code] || def.aliasesMap[code.toLowerCase()]; if (v) return v; }
+      const idx = (def.codes || []).indexOf(code);
+      return idx >= 0 ? (def.values || [])[idx] : null;
+    };
+    /* 1) 纯编码（如 6001）或 编码+名称（如 6001(销售收入)）：以编码为准 */
+    let name = codeToName(s);
+    if (!name) {
+      const m = s.match(/^(\d{4,10})\s*[（(\s]/);
+      if (m) name = codeToName(m[1]);
+    }
+    if (name) return name;
+    /* 2) 纯科目名：科目主数据里存在的标准名才当作科目列。
+          长表一定有明确的「科目/科目编码」列（detectWide 已提前排除），故此处不会误判。 */
+    const known = P.inferField(header);
+    if (known === 'subject') return null;
+    if ((def.values || []).some((v) => String(v).trim() === s)) return s;
+    return null;
+  };
+
+  /* 检测宽表：存在科目列头，且不存在明确的「科目」字段列 */
+  P.detectWide = function (rawRows) {
+    if (!Array.isArray(rawRows) || rawRows.length < 2) return null;
+    const headers = rawRows[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
+    if (headers.some((h) => P.inferField(h) === 'subject')) return null;
+    const subjectCols = [];
+    headers.forEach((h, i) => {
+      const name = P.subjectHeaderName(h);
+      if (name) subjectCols.push({ index: i, header: h, subject: name });
+    });
+    if (!subjectCols.length) return null;
+    return { headers: headers, subjectCols: subjectCols };
+  };
+
+  /* 宽表 → 内部长表二维数组：保留维度列，追加「科目」「金额」两列 */
+  P.expandWideRows = function (rawRows, wide) {
+    const headers = wide.headers, subjectCols = wide.subjectCols;
+    const colSet = new Set(subjectCols.map((c) => c.index));
+    const isNumCol = (h) => { const k = P.inferField(h); return k && WIDE_NUM_KEYS.includes(k); };
+    const keepIdx = headers.map((h, i) => i).filter((i) => !colSet.has(i) && !isNumCol(headers[i]));
+    const out = [keepIdx.map((i) => headers[i]).concat(['科目', '金额'])];
+    const expanded = [];
+    for (let r = 1; r < rawRows.length; r++) {
+      const raw = rawRows[r];
+      if (!raw || raw.every((v) => v == null || String(v).trim() === '')) continue;
+      subjectCols.forEach((c) => {
+        const val = raw[c.index];
+        if (val == null || String(val).trim() === '') return;
+        if (!P.parseNumber(val)) return; /* 空值与 0 不生成行，控制行数膨胀 */
+        expanded.push(keepIdx.map((i) => raw[i]).concat([c.subject, val]));
+      });
+    }
+    return { rows: out.concat(expanded), count: expanded.length, subjects: subjectCols.map((c) => c.subject) };
+  };
+
   P.cleanRows = function (rawRows, override) {
     const issues = [];
     if (!Array.isArray(rawRows) || rawRows.length < 2) return { rows: [], mapping: {}, issues: ['文件至少需要表头和一行数据'] };
