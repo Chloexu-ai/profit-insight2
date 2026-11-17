@@ -259,6 +259,28 @@
     return null;
   };
 
+  /* 按主数据字典规范化维度值（编码/别名/大小写 → 标准值） */
+  P.normalizeDim = function (key, value) {
+    const raw = String(value == null ? '' : value).trim();
+    if (!raw) return '';
+    const def = (window.PA_DICT.dimensions || []).find((d) => d.key === key);
+    if (!def) return raw;
+    if (def.aliasesMap) {
+      const direct = def.aliasesMap[raw];
+      if (direct) return direct;
+      const lower = def.aliasesMap[raw.toLowerCase()];
+      if (lower) return lower;
+    }
+    const n = norm(raw);
+    if (def.aliasesMap) {
+      for (const k of Object.keys(def.aliasesMap)) {
+        if (norm(k) === n) return def.aliasesMap[k];
+      }
+    }
+    const hit = (def.values || []).find((v) => norm(v) === n);
+    return hit || raw;
+  };
+
   P.parseNumber = function (v) {
     if (v == null || v === '') return 0;
     if (typeof v === 'number') return isFinite(v) ? v : 0;
@@ -287,12 +309,37 @@
     return s;
   };
 
-  const numKeys = allFields.filter((f) => ['revenue', 'cost', 'budget', 'budget_cost'].includes(f.key)).map((f) => f.key);
-  const dimKeys = allFields.filter((f) => ['period', 'region', 'product', 'channel'].includes(f.key)).map((f) => f.key);
+  const numKeys = ['amount', 'revenue', 'cost', 'budget', 'budget_cost'];
+  const dimKeys = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'period', 'region', 'product'];
   const ALL_KEYS = [...dimKeys, ...numKeys];
   P.ALL_KEYS = ALL_KEYS;
   P.DIM_KEYS = dimKeys;
   P.NUM_KEYS = numKeys;
+  P.TEMPLATE_KEYS = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'amount'];
+
+  function blankRow() {
+    const row = {};
+    dimKeys.forEach((k) => { row[k] = '未分类'; });
+    numKeys.forEach((k) => { row[k] = 0; });
+    row.month = '未指定月份';
+    row.data_type = '实际数';
+    return row;
+  }
+
+  /* 依据「科目 + 数据类型」把金额归集到收入/成本/预算，兼容旧指标口径 */
+  function deriveLegacyMeasures(row, found) {
+    const amount = P.parseNumber(row.amount);
+    if (!found.has('amount') || !amount) return;
+    const subj = String(row.subject || '');
+    const role = (window.PA_DICT.dataTypeRole || {})[row.data_type] || 'actual';
+    const dic = window.PA_DICT.subjectRole || {};
+    const isRevenue = (dic.revenue || []).some((s) => subj.indexOf(s) >= 0);
+    const isCost = (dic.cost || []).some((s) => subj.indexOf(s) >= 0);
+    if (role === 'actual' && isRevenue && !found.has('revenue')) row.revenue += amount;
+    if (role === 'actual' && isCost && !found.has('cost')) row.cost += amount;
+    if (role === 'budget' && isRevenue && !found.has('budget')) row.budget += amount;
+    if (role === 'budget' && isCost && !found.has('budget_cost')) row.budget_cost += amount;
+  }
 
   P.cleanRows = function (rawRows, override) {
     const issues = [];
@@ -310,7 +357,14 @@
       Object.entries(override).forEach(([key, header]) => { if (header && headers.includes(header)) mapping[header] = key; });
     }
     const found = new Set(Object.values(mapping));
-    if (![...numKeys].some((k) => found.has(k))) issues.push('未识别到任何金额字段（收入/成本/预算）');
+    if (![...numKeys].some((k) => found.has(k))) issues.push('未识别到任何金额字段（金额/收入/成本/预算）');
+
+    const hasHeader = (key) => headers.some((h) => mapping[h] === key);
+    const legacyPlan = hasHeader('amount') && !hasHeader('revenue') && !hasHeader('cost');
+    if (legacyPlan) issues.push('已按管报口径导入：使用「金额 + 科目 + 数据类型」，收入/成本/预算将自动归集');
+    if (!hasHeader('month') && !hasHeader('period')) issues.push('未识别到月份列');
+    if (!hasHeader('data_type')) issues.push('未识别到数据类型列，默认按「实际数」处理');
+    if (!hasHeader('subject')) issues.push('未识别到科目列，无法进行科目维度分析');
     const unmapped = headers.filter((h) => !mapping[h]);
     if (unmapped.length) issues.push('未映射列：' + unmapped.join('、'));
 
@@ -320,7 +374,7 @@
     for (let i = 1; i < rawRows.length; i++) {
       const raw = rawRows[i];
       if (!raw || raw.every((v) => v == null || String(v).trim() === '')) continue;
-      const row = { period: '未指定期间', region: '未分类', product: '未分类', channel: '未分类', revenue: 0, cost: 0, budget: 0, budget_cost: 0 };
+      const row = blankRow();
       headers.forEach((h, idx) => {
         const key = mapping[h];
         if (!key) return;
@@ -329,16 +383,23 @@
           const n = P.parseNumber(val);
           if (val !== '' && val != null && !isFinite(Number(String(val).replace(/[,¥￥\s]/g, '')))) bad += 1;
           row[key] = n;
-        } else if (key === 'period') row[key] = P.parsePeriod(val);
-        else row[key] = val == null || String(val).trim() === '' ? '未分类' : String(val).trim();
+        } else if (key === 'month' || key === 'period') {
+          row[key] = P.parsePeriod(val);
+        } else {
+          const s = val == null || String(val).trim() === '' ? '' : String(val).trim();
+          row[key] = s ? P.normalizeDim(key, s) : (key === 'data_type' ? '实际数' : '未分类');
+        }
       });
+      /* 期间向后兼容：month 与 period 同步，保证旧看板「按期间趋势」可用 */
+      if (row.month && row.month !== '未指定月份') row.period = row.month;
+      deriveLegacyMeasures(row, found);
       const sig = ALL_KEYS.map((k) => row[k]).join('|');
       if (seen.has(sig)) continue;
       seen.add(sig);
       rows.push(row);
     }
     if (bad) issues.push(bad + ' 个金额单元格无法解析，已按 0 处理');
-    return { rows, mapping, issues, columns: ALL_KEYS.filter((k) => found.has(k) || k === 'period') };
+    return { rows, mapping, issues, columns: ALL_KEYS.filter((k) => found.has(k) || k === 'month') };
   };
 
   P.metricValue = function (row, key) {
@@ -354,7 +415,7 @@
   };
 
   P.summary = function (rows) {
-    const s = { revenue: 0, cost: 0, budget: 0, budget_cost: 0 };
+    const s = { amount: 0, revenue: 0, cost: 0, budget: 0, budget_cost: 0 };
     (rows || []).forEach((r) => numKeys.forEach((k) => { s[k] += P.parseNumber(r[k]); }));
     s.actual_profit = s.revenue - s.cost;
     s.budget_profit = s.budget - s.budget_cost;

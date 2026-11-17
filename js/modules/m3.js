@@ -25,9 +25,9 @@
         { type: 'kpi', title: '实际利润', measure: 'actual_profit', span: 3 },
         { type: 'kpi', title: '利润率', measure: 'margin', span: 3 },
         { type: 'kpi', title: '利润预算差异', measure: 'profit_variance', span: 3 },
-        { type: 'line', title: '利润趋势（按期间）', measure: 'actual_profit', dimension: 'period', span: 12 },
-        { type: 'bar', title: '区域收入对比', measure: 'revenue', dimension: 'region', span: 6 },
-        { type: 'bar', title: '产品线利润对比', measure: 'actual_profit', dimension: 'product', span: 6 }
+        { type: 'line', title: '利润趋势（按月份）', measure: 'actual_profit', dimension: 'month', span: 12 },
+        { type: 'bar', title: '站点/国家收入对比', measure: 'revenue', dimension: 'site', span: 6 },
+        { type: 'bar', title: '平台利润对比', measure: 'actual_profit', dimension: 'platform', span: 6 }
       ]
     },
     attribution: {
@@ -35,19 +35,53 @@
         { type: 'kpi', title: '利润差异', measure: 'profit_variance', span: 4 },
         { type: 'kpi', title: '收入差异', measure: 'revenue_variance', span: 4 },
         { type: 'kpi', title: '预算利润率', measure: 'margin', span: 4 },
-        { type: 'bar', title: '产品线利润差异', measure: 'profit_variance', dimension: 'product', span: 6 },
-        { type: 'table', title: '区域利润归因明细', measure: 'profit_variance', dimension: 'region', span: 6 },
+        { type: 'bar', title: '报表产品利润差异', measure: 'profit_variance', dimension: 'report_product', span: 6 },
+        { type: 'table', title: '站点利润归因明细', measure: 'profit_variance', dimension: 'site', span: 6 },
         { type: 'pie', title: '渠道利润结构', measure: 'actual_profit', dimension: 'channel', span: 12 }
       ]
     },
-    region: {
-      label: '区域对标', widgets: [
-        { type: 'bar', title: '区域收入排名', measure: 'revenue', dimension: 'region', span: 6 },
-        { type: 'bar', title: '区域利润排名', measure: 'actual_profit', dimension: 'region', span: 6 },
-        { type: 'table', title: '区域经营明细', measure: 'actual_profit', dimension: 'region', span: 12 }
+    site: {
+      label: '站点/国家对标', widgets: [
+        { type: 'bar', title: '站点收入排名', measure: 'revenue', dimension: 'site', span: 6 },
+        { type: 'bar', title: '站点利润排名', measure: 'actual_profit', dimension: 'site', span: 6 },
+        { type: 'pie', title: '站点收入占比', measure: 'revenue', dimension: 'site', span: 6 },
+        { type: 'table', title: '站点经营明细', measure: 'actual_profit', dimension: 'site', span: 6 }
+      ]
+    },
+    product: {
+      label: '品类 · 品牌 · 产品', widgets: [
+        { type: 'bar', title: '品类收入对比', measure: 'revenue', dimension: 'category', span: 6 },
+        { type: 'pie', title: '品牌利润结构', measure: 'actual_profit', dimension: 'brand', span: 6 },
+        { type: 'bar', title: '报表产品收入 TOP', measure: 'revenue', dimension: 'report_product', span: 12 },
+        { type: 'table', title: '报表产品经营明细', measure: 'actual_profit', dimension: 'report_product', span: 12 }
+      ]
+    },
+    platform: {
+      label: '平台 · 渠道', widgets: [
+        { type: 'bar', title: '平台收入对比', measure: 'revenue', dimension: 'platform', span: 6 },
+        { type: 'bar', title: '平台利润对比', measure: 'actual_profit', dimension: 'platform', span: 6 },
+        { type: 'bar', title: '渠道收入排名', measure: 'revenue', dimension: 'channel', span: 6 },
+        { type: 'table', title: '渠道经营明细', measure: 'actual_profit', dimension: 'channel', span: 6 }
+      ]
+    },
+    subject: {
+      label: '科目结构', widgets: [
+        { type: 'bar', title: '科目金额结构', measure: 'amount', dimension: 'subject', span: 12 },
+        { type: 'table', title: '科目金额明细', measure: 'amount', dimension: 'subject', span: 12 }
+      ]
+    },
+    budget: {
+      label: '预算 vs 实际', widgets: [
+        { type: 'kpi', title: '利润差异', measure: 'profit_variance', span: 4 },
+        { type: 'kpi', title: '收入差异', measure: 'revenue_variance', span: 4 },
+        { type: 'kpi', title: '利润率', measure: 'margin', span: 4 },
+        { type: 'bar', title: '数据类型金额对比', measure: 'amount', dimension: 'data_type', span: 6 },
+        { type: 'bar', title: '站点利润差异', measure: 'profit_variance', dimension: 'site', span: 6 },
+        { type: 'table', title: '站点预算达成明细', measure: 'profit_variance', dimension: 'site', span: 12 }
       ]
     }
   };
+  const nameForTpl = { attribution: '利润归因看板', site: '站点对标看板', product: '品类品牌看板', platform: '平台渠道看板', subject: '科目结构看板', budget: '预算实际看板' };
 
   function toolbar() {
     const ds = P.state.datasets;
@@ -114,9 +148,16 @@
     const rows = sourceRows();
     current = current || { name: '经营分析看板', widgets: [], filters: {} };
     current.filters = current.filters || {};
-    box.innerHTML = P.DIM_KEYS.map((k) => {
-      const label = { period: '期间', region: '区域', product: '产品线', channel: '渠道' }[k];
-      const vals = P.dimensionValues(rows, k);
+    const labels = window.PA_DIM_LABELS || {};
+    const placeholder = { month: '未指定月份', data_type: '未分类', site: '未分类' };
+    /* 只展示数据中真实存在取值的维度，避免历史/空维度塞满筛选栏 */
+    const activeDims = P.DIM_KEYS.filter((k) => {
+      const vals = P.dimensionValues(rows, k).filter((v) => v && v !== (placeholder[k] || '未分类'));
+      return vals.length > 0;
+    });
+    box.innerHTML = activeDims.map((k) => {
+      const label = labels[k] || k;
+      const vals = P.dimensionValues(rows, k).filter((v) => v && v !== (placeholder[k] || '未分类'));
       return '<div><label class="tiny-text">' + label + '</label><select data-filter="' + k + '"><option value="">全部' + label + '</option>' +
         vals.map((v) => '<option value="' + P.h(v) + '"' + (String(current.filters[k]) === String(v) ? ' selected' : '') + '>' + P.h(v) + '</option>').join('') + '</select></div>';
     }).join('') + '<div class="spacer"></div><div class="tiny-text muted">当前 ' + rows.length + ' 行明细</div>';
@@ -142,8 +183,7 @@
       const tpl = TEMPLATES[b.dataset.tpl];
       current = current || { name: '经营分析看板', filters: {} };
       current.widgets = tpl.widgets.map((w, i) => Object.assign({ id: P.uid() + '-' + i }, w));
-      if (b.dataset.tpl === 'attribution') current.name = '利润归因看板';
-      if (b.dataset.tpl === 'region') current.name = '区域对标看板';
+      if (nameForTpl[b.dataset.tpl]) current.name = nameForTpl[b.dataset.tpl];
       P.qs('#m3-name', root).value = current.name;
       renderWidgets();
       P.toast('已按「' + tpl.label + '」习惯生成 ' + current.widgets.length + ' 个组件', 'ok');
@@ -177,9 +217,10 @@
   }
 
   function openAddWidget(editIndex) {
-    const w = editIndex != null ? current.widgets[editIndex] : { type: 'bar', title: '', measure: 'actual_profit', dimension: 'region', span: 6 };
+    const w = editIndex != null ? current.widgets[editIndex] : { type: 'bar', title: '', measure: 'actual_profit', dimension: 'site', span: 6 };
     const measureOpts = window.PA_MEASURES.map((m) => '<option value="' + m.key + '"' + (w.measure === m.key ? ' selected' : '') + '>' + m.label + '</option>').join('');
-    const dimOpts = P.DIM_KEYS.map((d) => '<option value="' + d + '"' + (w.dimension === d ? ' selected' : '') + '>' + ({ period: '期间', region: '区域', product: '产品线', channel: '渠道' }[d]) + '</option>').join('');
+    const labels = window.PA_DIM_LABELS || {};
+    const dimOpts = P.DIM_KEYS.map((d) => '<option value="' + d + '"' + (w.dimension === d ? ' selected' : '') + '>' + (labels[d] || d) + '</option>').join('');
     const m = P.openModal(editIndex != null ? '编辑组件' : '添加图表组件',
       '<div class="form-grid"><div><label class="field-label">标题</label><input class="field" id="w-title" value="' + P.h(w.title) + '" /></div>' +
       '<div><label class="field-label">类型</label><select class="form-select" id="w-type">' +
@@ -298,5 +339,5 @@
     charts.push(new Chart(canvas, cfg));
   }
 
-  function dimLabel(k) { return { period: '期间', region: '区域', product: '产品线', channel: '渠道' }[k] || k; }
+  function dimLabel(k) { return (window.PA_DIM_LABELS || {})[k] || k; }
 })();

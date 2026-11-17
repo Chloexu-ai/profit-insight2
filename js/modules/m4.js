@@ -137,7 +137,7 @@
   }
 
   function scheduleLabel(s) { return { daily: '每日 09:00', weekly: '每周一 09:00', monthly: '每月 1 日 09:00' }[s] || s; }
-  function dimLabel(k) { return { period: '期间', region: '区域', product: '产品线', channel: '渠道' }[k] || k; }
+  function dimLabel(k) { return (window.PA_DIM_LABELS || {})[k] || k; }
 
   function startTimer() {
     if (timer) clearInterval(timer);
