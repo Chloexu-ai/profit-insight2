@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>M3 免登录验证台</title>
+  <link rel="stylesheet" href="../css/style.css" />
+  <link rel="stylesheet" href="../css/filters.css" />
+  <script>
+    /* 云 SDK 桩：验证台不连云端，只验证本地渲染与计算链路 */
+    window.WorkBuddyCloud = {
+      createWorkBuddyCloud: function () {
+        return {
+          auth: {
+            getSession: function () { return Promise.resolve({ data: null }); },
+            sendOtp: function () { return Promise.resolve({ data: {} }); },
+            verifyOtp: function () { return Promise.resolve({ data: {} }); },
+            signInWithOAuth: function () { return Promise.resolve({ data: {} }); },
+            signOut: function () { return Promise.resolve({}); },
+            handleWorkBuddyCallback: function () { return Promise.resolve({ data: null }); },
+            handleWechatWebCallback: function () { return Promise.resolve({ data: null }); }
+          },
+          database: { from: function () { return {}; } },
+          llm: { models: { list: function () { return Promise.resolve([]); } } }
+        };
+      }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- core.js 的登录绑定需要这些节点存在 -->
+  <section id="login-view" class="hidden">
+    <div id="login-error"></div>
+    <div id="phone-error"></div>
+    <div class="login-tabs"><button class="tab active" data-tab="phone">手机号</button></div>
+    <div id="tab-phone" class="tab-panel">
+      <input id="phone" /><div id="phone-error"></div>
+      <input id="phone-code" /><button id="send-code"></button><button id="phone-login"></button>
+    </div>
+    <button id="wechat-login"></button>
+  </section>
+  <header><span id="user-name"></span><button id="copy-uid"></button><button id="logout"></button></header>
+
+  <div id="module-root" class="module-root"></div>
+  <div id="toast-wrap" class="toast-wrap"></div>
+  <div id="modal-root" class="modal-root hidden"></div>
+
+  <script src="../js/config.js"></script>
+  <script src="../js/core.js"></script>
+  <script src="../js/report/subjects.js"></script>
+  <script src="../js/report/engine.js"></script>
+  <script src="../js/report/view.js"></script>
+  <script src="../js/modules/m3.js"></script>
+  <script>
+    /* 固定样本：3 个月、2 种数据类型、含重名科目与一个无数据月份 */
+    function row(o) {
+      return Object.assign({
+        month: '', data_type: '实际数', site: 'ID', platform: 'Tiktok', channel: 'tt自播',
+        material: '自制', brand: 'GMEELAN', category: '底妆', report_product: '黑气垫',
+        subject: '', subject_code: '', amount: 0,
+        revenue: 0, cost: 0, budget: 0, budget_cost: 0
+      }, o);
+    }
+    var rows = [
+      row({ month: '2026-01', subject: '销售收入', subject_code: '6001', amount: 100, revenue: 100 }),
+      row({ month: '2026-01', subject: '销售收入', subject_code: '6001', amount: 20, revenue: 20 }),
+      row({ month: '2026-01', subject: '平台佣金', subject_code: '6602030101', amount: -30 }),
+      row({ month: '2026-01', subject: '订单量', subject_code: '1001', amount: 12 }),
+      row({ month: '2026-01', data_type: '预算数', subject: '销售收入', subject_code: '6001', amount: 150, budget: 150 }),
+      row({ month: '2026-02', site: 'MY', platform: 'Shopee', channel: 'Shopee货架销售', subject: '销售收入', subject_code: '6001', amount: 80, revenue: 80 }),
+      row({ month: '2026-02', site: 'MY', platform: 'Shopee', channel: 'Shopee货架销售', subject: '平台佣金', subject_code: '6602010101', amount: -8 }),
+      row({ month: '2026-10', site: 'US', platform: 'Amazon', channel: 'Amazon货架销售', subject: '销售收入', subject_code: '6001', amount: 60, revenue: 60 })
+    ];
+
+    var P = window.PA;
+    P.state.workspace = { id: 1, name: '验证空间' };
+    P.state.user = { id: 'u-verify', name: '验证账号' };
+    P.state.role = 'owner';
+    P.state.dataView = 'management';
+    P.state.datasets = [{ id: 1, name: '固定样本数据集', rows_json: rows, row_count: rows.length }];
+
+    window.PAM3.mount(document.getElementById('module-root'));
+
+    /* 通过 ?act= 触发一次交互，便于无头浏览器断言 */
+    var q = new URLSearchParams(location.search);
+    var act = q.get('act') || '';
+    function click(sel) { var el = document.querySelector(sel); if (el) { el.click(); return true; } return false; }
+    var acted = [];
+    if (act === 'tpl') acted.push(click('[data-tpl="overview"]'));
+    if (act === 'chart' || act === 'matrix' || act === 'report') acted.push(click('[data-view="' + act + '"]'));
+    if (act === 'select-all-month') { click('[data-ms-trigger="month"]'); acted.push(click('[data-ms-all="month"]')); }
+    if (act === 'select-none-site') { click('[data-ms-trigger="site"]'); acted.push(click('[data-ms-none="site"]')); }
+    if (act === 'pick-two-site') {
+      click('[data-ms-trigger="site"]');
+      var cbs = document.querySelectorAll('[data-ms-panel="site"] input[type=checkbox]');
+      if (cbs[0]) { cbs[0].checked = false; cbs[0].onchange(); }
+      if (cbs[1]) { cbs[1].checked = false; cbs[1].onchange(); }
+      acted.push(cbs.length);
+    }
+    window.__HARNESS__ = { act: act, acted: acted, ready: true };
+  </script>
+</body>
+</html>

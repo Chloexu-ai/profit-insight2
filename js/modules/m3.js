@@ -3,11 +3,18 @@
   const M = (window.PAM3 = {
     id: 'm3',
     title: 'M3 · 数据看板',
-    desc: '按领导看数习惯一键生成图表，配置筛选器、调整布局并保存到协作空间。',
+    desc: '按领导看数习惯一键生成图表，多选筛选、科目月度对比与管报预览共用同一套筛选状态。',
     init() {},
     mount(root) { render(root); },
     refresh() { if (currentRoot) render(currentRoot); },
-    destroy() { charts.forEach((c) => c.destroy && c.destroy()); charts = []; currentRoot = null; document.removeEventListener('click', closeMsOutside); }
+    destroy() {
+      charts.forEach((c) => c.destroy && c.destroy());
+      charts = [];
+      if (trendHandle && trendHandle.destroy) trendHandle.destroy();
+      trendHandle = null;
+      currentRoot = null;
+      document.removeEventListener('click', closeMsOutside);
+    }
   });
 
   let currentRoot = null;
@@ -15,8 +22,22 @@
   let current = null;
   let charts = [];
   let filteredRows = [];
+  let trendHandle = null;
+  let currentWsId = null;
+  /* 交互态（不进入持久化）：搜索词与展开的面板 */
+  let ui = { search: {}, open: null, trendCodes: [] };
 
   const PALETTE = ['#2f6bff', '#0e9f8a', '#f79009', '#7a5af8', '#d92d20', '#12b76a', '#1570ef', '#b54708'];
+
+  /* 参与多选的业务维度：period 已并入 month，不再单列 */
+  const FILTER_DIMS = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'region', 'product'];
+  const DIM_LABELS = {
+    month: '月份', data_type: '数据类型', site: '站点/国家', platform: '平台', channel: '渠道',
+    material: '素材来源', brand: '品牌', category: '品类', report_product: '报表产品',
+    subject: '科目', region: '区域（旧）', product: '产品线（旧）'
+  };
+  const DATA_TYPE_ORDER = ['实际数', '预算数', '预测数'];
+  const VIEWS = { chart: '图表', matrix: '科目月度对比', report: '管报' };
 
   const TEMPLATES = {
     overview: {
@@ -83,18 +104,337 @@
   };
   const nameForTpl = { attribution: '利润归因看板', site: '站点对标看板', product: '品类品牌看板', platform: '平台渠道看板', subject: '科目结构看板', budget: '预算实际看板' };
 
+  /* ---------------- 状态 ---------------- */
+
+  function registry() { return window.PA_REPORT_SUBJECTS || null; }
+
+  /* 统一筛选状态：优先用 report 引擎的归一化函数，保证与矩阵/管报同源 */
+  function normalizeState(saved) {
+    const s = saved && typeof saved === 'object' ? saved : {};
+    let state;
+    if (window.PAReport && window.PAReport.normalizeFilters) {
+      state = window.PAReport.normalizeFilters(s);
+    } else {
+      const dims = {};
+      FILTER_DIMS.forEach((k) => {
+        const v = s[k];
+        if (v == null || v === '') return;
+        dims[k] = Array.isArray(v) ? v.slice() : [String(v)];
+      });
+      state = { version: 2, source: { mode: 'all', datasetId: null }, dimensions: dims, periodMode: 'monthly', reportTemplateVersion: 'management-v1' };
+    }
+    state.source = state.source || { mode: 'all', datasetId: null };
+    state.dimensions = state.dimensions || {};
+    /* 旧看板里月份可能存的是「1月」这类原始写法，统一成期间 key，才能和筛选控件对上 */
+    if (Array.isArray(state.dimensions.month)) {
+      const seen = {};
+      state.dimensions.month = state.dimensions.month.map((v) => periodOf({ month: v, period: v }).key)
+        .filter((k) => (seen[k] ? false : (seen[k] = true)));
+    }
+    state.view = s.view || 'chart';
+    if (!VIEWS[state.view]) state.view = 'chart';
+    return state;
+  }
+
+  function filters() {
+    if (!current) current = { name: '经营分析看板', widgets: [], filters: normalizeState({}) };
+    if (!current.filters) current.filters = normalizeState({});
+    return current.filters;
+  }
+
+  /* 未出现 = 全部；[] = 全不选 */
+  function picked(k) {
+    const v = filters().dimensions[k];
+    return Array.isArray(v) ? v : null;
+  }
+  function dimIsAll(k) { return picked(k) === null; }
+  function dimIsNone(k) { const v = picked(k); return Array.isArray(v) && v.length === 0; }
+
+  /* ---------------- 数据源 ---------------- */
+
+  function datasetId() {
+    const s = filters().source;
+    return s && s.mode === 'dataset' && s.datasetId != null ? Number(s.datasetId) : null;
+  }
+
+  function sourceRows() {
+    const id = datasetId();
+    let rows;
+    if (id == null) rows = P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
+    else {
+      const ds = P.state.datasets.find((d) => d.id === id);
+      rows = ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    }
+    return P.applyDataView(rows);
+  }
+
+  function datasetLabel() {
+    const id = datasetId();
+    if (id == null) return '全部数据集（合并）';
+    const ds = P.state.datasets.find((d) => d.id === id);
+    return ds ? ds.name : '全部数据集（合并）';
+  }
+
+  /* ---------------- 维度取值 ---------------- */
+
+  function periodOf(row) {
+    if (window.PAReport && window.PAReport.normalizePeriod) return window.PAReport.normalizePeriod(row);
+    const raw = row && (row.period || row.month);
+    const s = String(raw == null ? '' : raw).trim();
+    const m = s.match(/^(\d{4})[年\/-](\d{1,2})/);
+    if (m) return { key: m[1] + '-' + String(m[2]).padStart(2, '0'), label: m[1] + '-' + String(m[2]).padStart(2, '0'), sortKey: Number(m[1]) * 100 + Number(m[2]) };
+    const m2 = s.match(/^(\d{1,2})月?$/);
+    if (m2) return { key: 'LEGACY-M' + String(m2[1]).padStart(2, '0'), label: m2[1] + '月（未标年份）', sortKey: 900000 + Number(m2[1]) };
+    return { key: 'LEGACY-UNKNOWN', label: '期间未知', sortKey: 999999 };
+  }
+
+  function subjectOptions(rows) {
+    const reg = registry();
+    const map = new Map();
+    (rows || []).forEach((r) => {
+      let code = r.subject_code || '';
+      let name = r.subject || '';
+      if (!code && reg && name) {
+        const hit = reg.byName[name];
+        if (hit && hit.length === 1) code = hit[0].code;
+      }
+      if (code && reg && reg.byCode[code]) name = reg.byCode[code].name;
+      if (!code && !name) return;
+      const key = code || name;
+      if (!map.has(key)) map.set(key, { key, label: code && name ? name + '（' + code + '）' : (name || code) });
+    });
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
+  }
+
+  /* 返回 [{key,label}]，key 用于筛选比较 */
+  function dimOptions(rows, k) {
+    if (k === 'month') {
+      const m = new Map();
+      (rows || []).forEach((r) => {
+        const p = periodOf(r);
+        if (!m.has(p.key)) m.set(p.key, { key: p.key, label: p.label, sortKey: p.sortKey });
+      });
+      return Array.from(m.values()).sort((a, b) => a.sortKey - b.sortKey);
+    }
+    if (k === 'subject') return subjectOptions(rows);
+    const vals = P.dimensionValues(rows, k).filter((v) => v && v !== '未分类' && v !== '未指定月份');
+    return vals.map((v) => ({ key: String(v), label: String(v) }));
+  }
+
+  function rowMatches(row, k, vals) {
+    if (k === 'month') return vals.indexOf(periodOf(row).key) >= 0;
+    if (k === 'subject') {
+      const code = String(row.subject_code || '');
+      const name = String(row.subject || '');
+      return vals.indexOf(code) >= 0 || vals.indexOf(name) >= 0;
+    }
+    return vals.indexOf(String(row[k] == null ? '' : row[k])) >= 0;
+  }
+
+  /* 统一过滤：与矩阵/管报共用同一份结果 */
+  function applyFilters() {
+    const rows = sourceRows();
+    const state = filters();
+    const dims = state.dimensions || {};
+
+    /* 明确全不选：任何维度是空数组 → 无匹配记录，不退回全部 */
+    const noneKeys = Object.keys(dims).filter((k) => Array.isArray(dims[k]) && dims[k].length === 0);
+
+    if (window.PAReport && window.PAReport.filterFacts) {
+      const r = window.PAReport.filterFacts(rows, state);
+      filteredRows = r.facts;
+      lastDiagnostics = r.diagnostics || [];
+      return;
+    }
+    let out = rows.slice();
+    if (noneKeys.length) { filteredRows = []; lastDiagnostics = []; return; }
+    Object.keys(dims).forEach((k) => {
+      const vals = dims[k];
+      if (!Array.isArray(vals) || !vals.length) return;
+      if (FILTER_DIMS.indexOf(k) < 0) return;
+      out = out.filter((r) => rowMatches(r, k, vals));
+    });
+    filteredRows = out;
+    lastDiagnostics = [];
+  }
+
+  let lastDiagnostics = [];
+
+  /* ---------------- 布局 ---------------- */
+
   function toolbar() {
     const ds = P.state.datasets;
+    const cur = filters();
+    const view = cur.view || 'chart';
     return '<div class="card"><div class="card-title"><h3>看板配置</h3><span class="sub">图表 · 筛选器 · 布局</span></div>' +
       '<div class="row"><div style="width:220px"><label class="field-label">数据源</label><select class="form-select" id="m3-dataset">' +
-      '<option value="all">全部数据集（合并）</option>' + ds.map((d) => '<option value="' + d.id + '">' + P.h(d.name) + '</option>').join('') + '</select></div>' +
+      '<option value="all"' + (ds && datasetId() == null ? ' selected' : '') + '>全部数据集（合并）</option>' +
+      ds.map((d) => '<option value="' + d.id + '"' + (datasetId() === d.id ? ' selected' : '') + '>' + P.h(d.name) + '</option>').join('') + '</select></div>' +
       '<div style="width:220px"><label class="field-label">已保存看板</label><select class="form-select" id="m3-dash"><option value="">— 新建看板 —</option>' +
       dashboards.map((d) => '<option value="' + d.id + '"' + (current && current.id === d.id ? ' selected' : '') + '>' + P.h(d.name) + '</option>').join('') + '</select></div>' +
       '<div style="width:160px"><label class="field-label">看板名称</label><input class="field" id="m3-name" value="' + P.h(current ? current.name : '经营分析看板') + '" /></div>' +
       '<div class="spacer"></div>' +
       Object.entries(TEMPLATES).map(([k, v]) => '<button class="btn tiny" data-tpl="' + k + '">一键生成 · ' + v.label + '</button>').join('') +
       '<button class="btn primary tiny" id="m3-save">保存看板</button><button class="btn tiny" id="m3-new">清空</button></div>' +
+      '<div class="m3-toolbar-line"><div class="m3-views" id="m3-views">' +
+      Object.entries(VIEWS).map(([k, label]) => '<button type="button" data-view="' + k + '"' + (view === k ? ' class="active"' : '') + '>' + label + '</button>').join('') +
+      '</div><span class="tiny-text muted" id="m3-filter-stat"></span></div>' +
       '<div id="m3-filters" class="filter-bar" style="margin-top:12px"></div></div>';
+  }
+
+  function filtersHtml() {
+    const rows = sourceRows();
+    current = current || { name: '经营分析看板', widgets: [], filters: normalizeState({}) };
+    const activeDims = FILTER_DIMS.filter((k) => dimOptions(rows, k).length > 0);
+    if (!activeDims.length) {
+      return '<span class="tiny-text muted">当前数据源没有可用于筛选的维度取值</span>';
+    }
+    return activeDims.map((k) => {
+      const opts = dimOptions(rows, k);
+      const selected = picked(k);
+      const isAll = selected === null;
+      const isNone = Array.isArray(selected) && selected.length === 0;
+      const summary = isAll ? '全部' : isNone ? '全不选 · 无匹配' : (selected.length === 1 ? labelOf(opts, selected[0]) : '已选 ' + selected.length + ' 项');
+      const count = isAll || isNone ? 0 : selected.length;
+      return '<div class="ms-filter" data-ms="' + k + '">' +
+        '<label class="tiny-text">' + (DIM_LABELS[k] || k) + '</label>' +
+        '<button type="button" class="ms-trigger" data-ms-trigger="' + k + '">' +
+        '<span class="ms-summary">' + P.h(summary) + '</span><span class="ms-caret">▾</span>' +
+        (count ? '<span class="ms-count">' + count + '</span>' : '') + '</button>' +
+        '<div class="ms-panel hidden" data-ms-panel="' + k + '"></div></div>';
+    }).join('') + '<div class="spacer"></div>' +
+      (P.isRestrictedView() ? '<span class="badge warn tiny-text">受限视图 · 敏感科目已隐藏</span>' : '');
+  }
+
+  function labelOf(opts, key) {
+    const hit = opts.find((o) => o.key === key);
+    return hit ? hit.label : key;
+  }
+
+  function panelHtml(k, opts) {
+    const selected = picked(k);
+    const isAll = selected === null;
+    const selectedSet = isAll ? opts.map((o) => o.key) : (selected || []);
+    const term = (ui.search[k] || '').trim().toLowerCase();
+    const visible = term ? opts.filter((o) => o.label.toLowerCase().indexOf(term) >= 0) : opts;
+    return '<div class="ms-search"><input type="text" data-ms-search="' + k + '" placeholder="搜索' + P.h(DIM_LABELS[k] || k) + '…" value="' + P.h(ui.search[k] || '') + '" /></div>' +
+      '<div class="ms-actions"><button type="button" class="btn tiny ghost" data-ms-all="' + k + '">全选' + (term ? '搜索结果' : '') + '</button>' +
+      '<button type="button" class="btn tiny ghost" data-ms-none="' + k + '">全不选</button>' +
+      '<button type="button" class="btn tiny ghost" data-ms-reset="' + k + '">重置</button></div>' +
+      '<div class="ms-options">' +
+      (visible.length ? visible.map((o) => '<label class="ms-opt"><input type="checkbox" value="' + P.h(o.key) + '"' +
+        (selectedSet.indexOf(o.key) >= 0 ? ' checked' : '') + ' /><span title="' + P.h(o.label) + '">' + P.h(o.label) + '</span></label>').join('')
+        : '<div class="ms-empty">没有匹配的取值</div>') +
+      '</div>' +
+      '<div class="ms-foot"><span>' + (isAll ? '当前为「全部」' : selectedSet.length ? '已选 ' + selectedSet.length : '已选 0（无匹配）') + '</span><span>共 ' + opts.length + '</span></div>';
+  }
+
+  function renderFilters() {
+    const box = P.qs('#m3-filters', currentRoot);
+    if (!box) return;
+    box.innerHTML = filtersHtml();
+    P.qsa('[data-ms-trigger]', box).forEach((btn) => btn.onclick = (e) => {
+      e.stopPropagation();
+      const k = btn.dataset.msTrigger;
+      const panel = P.qs('[data-ms-panel="' + k + '"]', box);
+      const opening = panel.classList.contains('hidden');
+      P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
+      if (opening) {
+        const opts = dimOptions(sourceRows(), k);
+        panel.innerHTML = panelHtml(k, opts);
+        panel.classList.remove('hidden');
+        ui.open = k;
+        wirePanel(panel, k);
+        const input = P.qs('[data-ms-search="' + k + '"]', panel);
+        if (input) input.focus();
+      } else ui.open = null;
+    });
+    document.removeEventListener('click', closeMsOutside);
+    document.addEventListener('click', closeMsOutside);
+
+    /* 重新打开上次的面板（搜索/勾选后保持展开） */
+    if (ui.open) {
+      const panel = P.qs('[data-ms-panel="' + ui.open + '"]', box);
+      const btn = P.qs('[data-ms-trigger="' + ui.open + '"]', box);
+      if (panel && btn) {
+        panel.innerHTML = panelHtml(ui.open, dimOptions(sourceRows(), ui.open));
+        panel.classList.remove('hidden');
+        wirePanel(panel, ui.open);
+      }
+    }
+    updateStat();
+  }
+
+  function wirePanel(panel, k) {
+    const search = P.qs('[data-ms-search="' + k + '"]', panel);
+    if (search) {
+      search.oninput = () => {
+        ui.search[k] = search.value;
+        const pos = search.selectionStart;
+        const box = P.qs('[data-ms-panel="' + k + '"]', currentRoot);
+        box.innerHTML = panelHtml(k, dimOptions(sourceRows(), k));
+        wirePanel(box, k);
+        const again = P.qs('[data-ms-search="' + k + '"]', box);
+        if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch (e) {} }
+      };
+    }
+    P.qsa('input[type=checkbox]', panel).forEach((cb) => cb.onchange = () => {
+      const opts = dimOptions(sourceRows(), k);
+      const term = (ui.search[k] || '').trim().toLowerCase();
+      const visibleKeys = term ? opts.filter((o) => o.label.toLowerCase().indexOf(term) >= 0).map((o) => o.key) : opts.map((o) => o.key);
+      const prev = picked(k);
+      /* 「全部」状态下勾选任意项 = 以全部取值显式作为起点，便于增减 */
+      let base = prev === null ? opts.map((o) => o.key) : prev.slice();
+      visibleKeys.forEach((key) => {
+        const i = base.indexOf(key);
+        if (cb.checked && i < 0) base.push(key);
+        if (!cb.checked && i >= 0) base.splice(i, 1);
+      });
+      setDim(k, base);
+    });
+    const all = P.qs('[data-ms-all="' + k + '"]', panel);
+    if (all) all.onclick = () => {
+      const opts = dimOptions(sourceRows(), k);
+      const term = (ui.search[k] || '').trim().toLowerCase();
+      const visibleKeys = term ? opts.filter((o) => o.label.toLowerCase().indexOf(term) >= 0).map((o) => o.key) : opts.map((o) => o.key);
+      const prev = picked(k);
+      const base = prev === null ? opts.map((o) => o.key) : prev.slice();
+      visibleKeys.forEach((key) => { if (base.indexOf(key) < 0) base.push(key); });
+      setDim(k, base);
+    };
+    const none = P.qs('[data-ms-none="' + k + '"]', panel);
+    if (none) none.onclick = () => setDim(k, []);
+    const reset = P.qs('[data-ms-reset="' + k + '"]', panel);
+    if (reset) reset.onclick = () => setDim(k, null);
+  }
+
+  function setDim(k, value) {
+    const f = filters();
+    if (value === null) delete f.dimensions[k];
+    else f.dimensions[k] = value.slice();
+    renderFilters();
+    renderViewBody();
+  }
+
+  function closeMsOutside(e) {
+    if (!currentRoot) return;
+    const box = P.qs('#m3-filters', currentRoot);
+    if (!box) return;
+    if (!box.contains(e.target)) {
+      P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
+      ui.open = null;
+    }
+  }
+
+  function updateStat() {
+    const el = P.qs('#m3-filter-stat', currentRoot);
+    if (!el) return;
+    const noneDim = FILTER_DIMS.filter((k) => dimIsNone(k));
+    if (noneDim.length) {
+      el.innerHTML = '<span class="badge warn">' + noneDim.map((k) => DIM_LABELS[k] || k).join('、') + ' 为「全不选」，当前无匹配记录</span>';
+      return;
+    }
+    el.textContent = '筛选后 ' + filteredRows.length + ' 行明细 · 来源：' + datasetLabel();
   }
 
   function widgetsHtml() {
@@ -112,141 +452,113 @@
       '<div class="widget-body" data-body="' + i + '"></div></div>';
   }
 
+  function viewBodyHtml() {
+    const view = filters().view || 'chart';
+    if (view === 'chart') return '<div style="margin-top:16px">' + widgetsHtml() + '</div>';
+    return '<div class="card" style="margin-top:16px"><div id="m3-report-meta"></div><div id="m3-report-body"></div></div>';
+  }
+
   function render(root) {
     currentRoot = root;
-    root.innerHTML = toolbar() + '<div style="margin-top:16px">' + widgetsHtml() + '</div>';
+    root.innerHTML = toolbar() + '<div style="margin-top:16px" id="m3-view-body">' + viewBodyHtml() + '</div>';
     wireToolbar(root);
     renderFilters();
-    renderWidgets();
+    applyFilters();
+    renderViewBody();
+  }
+
+  function renderViewBody() {
+    if (!currentRoot) return;
+    const view = filters().view || 'chart';
+    const body = P.qs('#m3-view-body', currentRoot);
+    if (!body) return;
+    if (view === 'chart') {
+      const hasGrid = P.qs('#widget-grid', currentRoot);
+      if (!hasGrid && current && current.widgets && current.widgets.length) {
+        /* 首次由空态切换到有组件时，需要重建容器，否则查不到挂载点 */
+        body.innerHTML = viewBodyHtml();
+        wireWidgets();
+      }
+      renderWidgets();
+      updateStat();
+      return;
+    }
+    renderReportViews();
+    updateStat();
   }
 
   async function loadDashboards() {
-    dashboards = await P.dbList(P.TABLES.dashboards, { eq: { workspace_id: P.state.workspace.id }, order: 'updated_at', ascending: false });
+    const wsId = P.state.workspace ? P.state.workspace.id : null;
+    dashboards = await P.dbList(P.TABLES.dashboards, { eq: { workspace_id: wsId }, order: 'updated_at', ascending: false });
+    /* 切换空间后不得保留上一个空间的看板与筛选状态 */
+    if (wsId !== currentWsId) {
+      currentWsId = wsId;
+      current = null;
+      ui = { search: {}, open: null, trendCodes: [] };
+    }
   }
   M.loadDashboards = loadDashboards;
 
-  function sourceRows() {
-    const sel = P.qs('#m3-dataset', currentRoot);
-    const id = sel ? sel.value : 'all';
-    let rows;
-    if (id === 'all') rows = P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
-    else {
-      const ds = P.state.datasets.find((d) => d.id === Number(id));
-      rows = ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
-    }
-    /* 数据视图权限：业务端剔除敏感科目行 */
-    return P.applyDataView(rows);
-  }
-
-  /* 归一化筛选值：既兼容旧的单值字符串，也支持新的数组（多选） */
-  function filterValues(v) {
-    if (v == null || v === '') return [];
-    return Array.isArray(v) ? v.filter((x) => x !== '' && x != null).map(String) : [String(v)];
-  }
-  function applyFilters() {
-    let rows = sourceRows();
-    const f = current && current.filters ? current.filters : {};
-    P.DIM_KEYS.forEach((k) => {
-      const vals = filterValues(f[k]);
-      if (vals.length) rows = rows.filter((r) => vals.indexOf(String(r[k])) >= 0);
-    });
-    filteredRows = rows;
-  }
-
-  function renderFilters() {
-    const box = P.qs('#m3-filters', currentRoot);
-    if (!box) return;
-    const rows = sourceRows();
-    current = current || { name: '经营分析看板', widgets: [], filters: {} };
-    current.filters = current.filters || {};
-    const labels = window.PA_DIM_LABELS || {};
-    const placeholder = { month: '未指定月份', data_type: '未分类', site: '未分类' };
-    /* 只展示数据中真实存在取值的维度，避免历史/空维度塞满筛选栏 */
-    const activeDims = P.DIM_KEYS.filter((k) => {
-      const vals = P.dimensionValues(rows, k).filter((v) => v && v !== (placeholder[k] || '未分类'));
-      return vals.length > 0;
-    });
-    box.innerHTML = activeDims.map((k) => {
-      const label = labels[k] || k;
-      const vals = P.dimensionValues(rows, k).filter((v) => v && v !== (placeholder[k] || '未分类'));
-      const picked = filterValues(current.filters[k]);
-      const summary = picked.length === 0 ? '全部' + label : (picked.length === 1 ? picked[0] : label + ' · 已选 ' + picked.length + ' 项');
-      return '<div class="ms-filter" data-ms="' + k + '"><label class="tiny-text">' + label + '</label>' +
-        '<button type="button" class="ms-trigger" data-ms-trigger="' + k + '"><span class="ms-summary">' + P.h(summary) + '</span><span class="ms-caret">▾</span>' +
-        (picked.length ? '<span class="ms-count">' + picked.length + '</span>' : '') + '</button>' +
-        '<div class="ms-panel hidden" data-ms-panel="' + k + '">' +
-        '<div class="ms-actions"><button type="button" class="btn tiny ghost" data-ms-all="' + k + '">全选</button>' +
-        '<button type="button" class="btn tiny ghost" data-ms-clear="' + k + '">清空</button></div>' +
-        '<div class="ms-options">' + vals.map((v) => '<label class="ms-opt"><input type="checkbox" value="' + P.h(v) + '"' +
-          (picked.indexOf(String(v)) >= 0 ? ' checked' : '') + ' /><span>' + P.h(v) + '</span></label>').join('') + '</div></div></div>';
-    }).join('') + '<div class="spacer"></div>' +
-      (P.isRestrictedView() ? '<span class="badge warn tiny-text">受限视图 · 敏感科目已隐藏</span>' : '') +
-      '<div class="tiny-text muted">当前 ' + filteredRows.length + ' 行明细</div>';
-    wireMultiSelect(box);
-  }
-
-  function wireMultiSelect(box) {
-    /* 点击触发器：切换面板，点击外部关闭 */
-    P.qsa('[data-ms-trigger]', box).forEach((btn) => btn.onclick = (e) => {
-      e.stopPropagation();
-      const k = btn.dataset.msTrigger;
-      const panel = P.qs('[data-ms-panel="' + k + '"]', box);
-      const willOpen = panel.classList.contains('hidden');
-      P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
-      if (willOpen) panel.classList.remove('hidden');
-    });
-    document.addEventListener('click', closeMsOutside);
-    /* 复选框变更：写回数组并刷新图表 */
-    P.qsa('[data-ms-panel]', box).forEach((panel) => {
-      const k = panel.dataset.msPanel;
-      P.qsa('input[type=checkbox]', panel).forEach((cb) => cb.onchange = () => {
-        current.filters[k] = P.qsa('input[type=checkbox]:checked', panel).map((x) => x.value);
-        renderFilters(); renderWidgets();
-      });
-      const all = P.qs('[data-ms-all="' + k + '"]', panel);
-      if (all) all.onclick = () => {
-        current.filters[k] = P.qsa('input[type=checkbox]', panel).map((x) => x.value);
-        renderFilters(); renderWidgets();
-      };
-      const clear = P.qs('[data-ms-clear="' + k + '"]', panel);
-      if (clear) clear.onclick = () => { delete current.filters[k]; renderFilters(); renderWidgets(); };
-    });
-  }
-  function closeMsOutside(e) {
-    if (!currentRoot) return;
-    const box = P.qs('#m3-filters', currentRoot);
-    if (!box) return;
-    if (!box.contains(e.target)) P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
-  }
-
   function wireToolbar(root) {
-    P.qs('#m3-dataset', root).onchange = () => { renderFilters(); renderWidgets(); };
+    const sel = P.qs('#m3-dataset', root);
+    if (sel) sel.onchange = () => {
+      const v = sel.value;
+      const f = filters();
+      f.source = v === 'all' ? { mode: 'all', datasetId: null } : { mode: 'dataset', datasetId: Number(v) };
+      ui.open = null;
+      renderFilters(); renderViewBody();
+    };
     P.qs('#m3-dash', root).onchange = async (e) => {
-      if (!e.target.value) { current = { name: '经营分析看板', widgets: [], filters: {} }; render(root); return; }
+      if (!e.target.value) { current = { name: '经营分析看板', widgets: [], filters: normalizeState({}) }; render(root); return; }
       const d = dashboards.find((x) => x.id === Number(e.target.value));
       if (!d) return;
-      current = { id: d.id, name: d.name, widgets: Array.isArray(d.widgets_json) ? d.widgets_json : [], filters: d.filters_json || {}, layout: d.layout_json || [] };
+      current = {
+        id: d.id, name: d.name,
+        widgets: Array.isArray(d.widgets_json) ? d.widgets_json : [],
+        filters: normalizeState(d.filters_json || {}),
+        layout: d.layout_json || []
+      };
+      ui.open = null;
+      ui.search = {};
       render(root);
     };
     P.qs('#m3-name', root).oninput = (e) => { if (current) current.name = e.target.value; };
-    P.qs('#m3-new', root).onclick = () => { current = { name: '经营分析看板', widgets: [], filters: {} }; render(root); };
+    P.qs('#m3-new', root).onclick = () => { current = { name: '经营分析看板', widgets: [], filters: normalizeState({}) }; ui = { search: {}, open: null, trendCodes: [] }; render(root); };
     P.qs('#m3-save', root).onclick = save;
+    P.qsa('[data-view]', root).forEach((b) => b.onclick = () => {
+      filters().view = b.dataset.view;
+      P.qsa('[data-view]', root).forEach((x) => x.classList.toggle('active', x === b));
+      const body = P.qs('#m3-view-body', currentRoot);
+      if (body) body.innerHTML = viewBodyHtml();
+      wireWidgets();
+      renderViewBody();
+    });
     P.qsa('[data-tpl]', root).forEach((b) => b.onclick = () => {
       const tpl = TEMPLATES[b.dataset.tpl];
-      current = current || { name: '经营分析看板', filters: {} };
+      current = current || { name: '经营分析看板', widgets: [], filters: normalizeState({}) };
       current.widgets = tpl.widgets.map((w, i) => Object.assign({ id: P.uid() + '-' + i }, w));
       if (nameForTpl[b.dataset.tpl]) current.name = nameForTpl[b.dataset.tpl];
       P.qs('#m3-name', root).value = current.name;
-      renderWidgets();
+      /* 首次生成时组件容器还不存在，必须整体重绘后才能挂载图表 */
+      filters().view = 'chart';
+      P.qsa('[data-view]', root).forEach((x) => x.classList.toggle('active', x.dataset.view === 'chart'));
+      renderViewBody();
       P.toast('已按「' + tpl.label + '」习惯生成 ' + current.widgets.length + ' 个组件', 'ok');
     });
+    wireWidgets();
+  }
+
+  function wireWidgets() {
+    const root = currentRoot;
     const add = P.qs('#add-widget', root);
     if (add) add.onclick = openAddWidget;
     P.qsa('[data-widx]', root).forEach((el) => {
       const i = Number(el.dataset.widx);
       P.qsa('[data-move]', el).forEach((btn) => btn.onclick = () => move(i, btn.dataset.move === 'up' ? -1 : 1));
-      P.qs('[data-remove]', el).onclick = () => { current.widgets.splice(i, 1); render(root); };
-      P.qs('[data-edit]', el).onclick = () => openAddWidget(i);
+      const rm = P.qs('[data-remove]', el);
+      if (rm) rm.onclick = () => { current.widgets.splice(i, 1); render(currentRoot); };
+      const ed = P.qs('[data-edit]', el);
+      if (ed) ed.onclick = () => openAddWidget(i);
       el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', String(i)); });
       el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('drag-over'); });
       el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
@@ -256,7 +568,7 @@
         if (isNaN(from) || from === i) return;
         const item = current.widgets.splice(from, 1)[0];
         current.widgets.splice(i, 0, item);
-        render(root);
+        render(currentRoot);
       });
     });
   }
@@ -271,8 +583,7 @@
   function openAddWidget(editIndex) {
     const w = editIndex != null ? current.widgets[editIndex] : { type: 'bar', title: '', measure: 'actual_profit', dimension: 'site', span: 6 };
     const measureOpts = window.PA_MEASURES.map((m) => '<option value="' + m.key + '"' + (w.measure === m.key ? ' selected' : '') + '>' + m.label + '</option>').join('');
-    const labels = window.PA_DIM_LABELS || {};
-    const dimOpts = P.DIM_KEYS.map((d) => '<option value="' + d + '"' + (w.dimension === d ? ' selected' : '') + '>' + (labels[d] || d) + '</option>').join('');
+    const dimOpts = P.DIM_KEYS.map((d) => '<option value="' + d + '"' + (w.dimension === d ? ' selected' : '') + '>' + (DIM_LABELS[d] || d) + '</option>').join('');
     const m = P.openModal(editIndex != null ? '编辑组件' : '添加图表组件',
       '<div class="form-grid"><div><label class="field-label">标题</label><input class="field" id="w-title" value="' + P.h(w.title) + '" /></div>' +
       '<div><label class="field-label">类型</label><select class="form-select" id="w-type">' +
@@ -294,15 +605,29 @@
     };
   }
 
+  function saveState() {
+    const f = filters();
+    return JSON.parse(JSON.stringify({
+      version: 2,
+      source: f.source,
+      dimensions: f.dimensions,
+      periodMode: f.periodMode || 'monthly',
+      reportTemplateVersion: f.reportTemplateVersion || 'management-v1',
+      view: f.view || 'chart'
+    }));
+  }
+
   async function save() {
-    if (!current || !current.widgets.length) { P.toast('请先生成或添加组件', 'error'); return; }
+    const view = filters().view || 'chart';
+    /* 矩阵/管报视图只保存筛选状态也是有效配置；图表视图才要求有组件 */
+    if (!current || (!current.widgets.length && view === 'chart')) { P.toast('请先生成或添加组件', 'error'); return; }
     const btn = P.qs('#m3-save', currentRoot);
     btn.disabled = true; btn.textContent = '保存中…';
     try {
       const payload = {
         workspace_id: P.state.workspace.id, owner_name: P.state.user.name || null,
         name: P.qs('#m3-name', currentRoot).value.trim() || '经营分析看板',
-        widgets_json: current.widgets, filters_json: current.filters || {},
+        widgets_json: current.widgets, filters_json: saveState(),
         layout_json: current.widgets.map((w) => w.id), updated_at: new Date().toISOString()
       };
       let saved;
@@ -310,13 +635,15 @@
       else saved = await P.dbInsert(P.TABLES.dashboards, payload);
       current.id = saved.id; current.name = saved.name;
       await loadDashboards();
-      P.toast('看板已保存到协作空间', 'ok');
+      P.toast('看板已保存到协作空间（含数据源、筛选与视图）', 'ok');
       render(currentRoot);
     } catch (e) { P.toast('保存失败：' + e.message, 'error'); btn.disabled = false; btn.textContent = '保存看板'; }
   }
 
+  /* ---------------- 图表组件 ---------------- */
+
   function renderWidgets() {
-    if (!currentRoot) return;
+    if (!currentRoot || !current || !current.widgets) return;
     charts.forEach((c) => c.destroy && c.destroy()); charts = [];
     applyFilters();
     current.widgets.forEach((w, i) => {
@@ -341,7 +668,7 @@
   function renderTable(body, w) {
     const rows = P.aggregate(filteredRows, { dimensions: [w.dimension], measure: w.measure, agg: 'sum', orderBy: { field: 'value', direction: 'desc' }, limit: 12 });
     const base = P.summary(filteredRows);
-    body.innerHTML = '<div class="table-wrap"><table><thead><tr><th>' + P.h(dimLabel(w.dimension)) + '</th><th class="num">' + P.h(P.measureLabel(w.measure)) +
+    body.innerHTML = '<div class="table-wrap"><table><thead><tr><th>' + P.h(DIM_LABELS[w.dimension] || w.dimension) + '</th><th class="num">' + P.h(P.measureLabel(w.measure)) +
       '</th><th class="num">占实际利润</th></tr></thead><tbody>' + rows.map((r) => {
         const share = base.actual_profit ? r.value / Math.abs(base.actual_profit) : 0;
         return '<tr><td>' + P.h(r[w.dimension]) + '</td><td class="num ' + P.deltaClass(r.value) + '">' + P.formatMeasure(w.measure, r.value) +
@@ -391,5 +718,122 @@
     charts.push(new Chart(canvas, cfg));
   }
 
-  function dimLabel(k) { return (window.PA_DIM_LABELS || {})[k] || k; }
+  /* ---------------- 科目月度对比 / 管报 ---------------- */
+
+  function visibleTemplate() {
+    const reg = registry();
+    if (!reg) return [];
+    if (!P.canSeeSubjectCode) return reg.list.slice();
+    return reg.list.filter((s) => P.canSeeSubjectCode(s.code));
+  }
+
+  function buildMatrix() {
+    if (!window.PAReport || !window.PAReport.buildMonthlyMatrix) return null;
+    applyFilters();
+    return window.PAReport.buildMonthlyMatrix({
+      facts: filteredRows,
+      template: visibleTemplate(),
+      filters: filters(),
+      rules: { subjectRule: 'direct' }
+    });
+  }
+
+  function renderReportViews() {
+    const metaEl = P.qs('#m3-report-meta', currentRoot);
+    const bodyEl = P.qs('#m3-report-body', currentRoot);
+    if (!metaEl || !bodyEl) return;
+    const matrix = buildMatrix();
+    if (!matrix) {
+      metaEl.innerHTML = '';
+      bodyEl.innerHTML = '<div class="empty">报表模块尚未加载（js/report/engine.js 未就绪），请刷新页面后重试。</div>';
+      return;
+    }
+    const diag = (matrix.diagnostics || []).concat(lastDiagnostics || []);
+    if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, matrix.meta, diag);
+    else metaEl.innerHTML = '<div class="rpt-meta">共 ' + matrix.rows.length + ' 行科目 · ' + matrix.columns.length + ' 列</div>';
+
+    const view = filters().view;
+    bodyEl.innerHTML = '';
+    if (trendHandle && trendHandle.destroy) { trendHandle.destroy(); trendHandle = null; }
+
+    if (view === 'matrix') {
+      const picker = document.createElement('div');
+      picker.className = 'm3-toolbar-line';
+      picker.innerHTML = trendPickerHtml(matrix);
+      bodyEl.appendChild(picker);
+      const trendBox = document.createElement('div');
+      trendBox.id = 'm3-trend-box';
+      bodyEl.appendChild(trendBox);
+      const tableBox = document.createElement('div');
+      tableBox.id = 'm3-matrix-box';
+      bodyEl.appendChild(tableBox);
+      wireTrendPicker(matrix, trendBox);
+      renderTrend(matrix, trendBox);
+      if (window.PAReportView && window.PAReportView.renderMatrix) {
+        window.PAReportView.renderMatrix(tableBox, matrix, {
+          onRowClick: (code) => { if (ui.trendCodes.indexOf(code) < 0) { ui.trendCodes.push(code); renderTrend(matrix, trendBox); } }
+        });
+      }
+    } else {
+      if (window.PAReportView && window.PAReportView.renderReport) {
+        window.PAReportView.renderReport(bodyEl, matrix, {});
+      } else {
+        bodyEl.innerHTML = '<div class="empty">管报展示模块尚未加载（js/report/view.js 未就绪）。</div>';
+      }
+    }
+  }
+
+  function trendCandidates(matrix) {
+    const totals = {};
+    matrix.rows.forEach((r) => {
+      /* 数量、人数与金额不是同一量纲，不进同一条趋势线 */
+      if ((r.unit || 'money') !== 'money') return;
+      let sum = 0;
+      Object.keys(r.cells || {}).forEach((k) => { sum += Math.abs(Number(r.cells[k]) || 0); });
+      if (sum > 0) totals[r.code] = sum;
+    });
+    return Object.keys(totals).sort((a, b) => totals[b] - totals[a]).slice(0, 40).map((code) => {
+      const row = matrix.rows.find((r) => r.code === code);
+      return { code, name: row ? row.name : code, total: totals[code] };
+    });
+  }
+
+  function trendPickerHtml(matrix) {
+    const list = trendCandidates(matrix);
+    const nonMoney = matrix.rows.filter((r) => (r.unit || 'money') !== 'money' && r.hasData).length;
+    const hint = nonMoney ? '<span class="tiny-text muted">已排除 ' + nonMoney + ' 个数量/人数科目（不与金额同轴）</span>' : '<span class="tiny-text muted">按住 Ctrl / Cmd 可多选，最多 8 条</span>';
+    if (!list.length) return '<span class="tiny-text muted">当前筛选范围没有可绘制趋势的金额科目</span>' + hint;
+    if (!ui.trendCodes.length) ui.trendCodes = list.slice(0, 3).map((x) => x.code);
+    return '<label class="tiny-text">趋势科目</label><select class="form-select" id="m3-trend-codes" multiple size="4" style="width:320px">' +
+      list.map((x) => '<option value="' + P.h(x.code) + '"' + (ui.trendCodes.indexOf(x.code) >= 0 ? ' selected' : '') + '>' +
+        P.h(x.name) + '（' + P.h(x.code) + '）</option>').join('') + '</select>' + hint;
+  }
+
+  function wireTrendPicker(matrix, trendBox) {
+    const sel = P.qs('#m3-trend-codes', currentRoot);
+    if (!sel) return;
+    sel.onchange = () => {
+      ui.trendCodes = Array.from(sel.selectedOptions).map((o) => o.value).slice(0, 8);
+      renderTrend(matrix, trendBox);
+    };
+  }
+
+  function renderTrend(matrix, trendBox) {
+    if (!trendBox) return;
+    if (trendHandle && trendHandle.destroy) { trendHandle.destroy(); trendHandle = null; }
+    trendBox.innerHTML = '';
+    if (!window.PAReport || !window.PAReport.buildTrend || !ui.trendCodes.length) return;
+    const types = (matrix.meta && matrix.meta.dataTypes) || [];
+    const dataType = types.indexOf('实际数') >= 0 ? '实际数' : types[0];
+    const trend = window.PAReport.buildTrend({ matrix, codes: ui.trendCodes, data_type: dataType });
+    if (!trend || !trend.labels.length) {
+      trendBox.innerHTML = '<div class="empty">所选科目没有可展示的月份数据</div>';
+      return;
+    }
+    if (window.PAReportView && window.PAReportView.renderTrend) {
+      trendHandle = window.PAReportView.renderTrend(trendBox, trend, {});
+    } else {
+      trendBox.innerHTML = '<div class="empty">趋势展示模块未加载</div>';
+    }
+  }
 })();
