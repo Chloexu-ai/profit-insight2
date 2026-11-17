@@ -55,6 +55,13 @@ git push -u origin feature/m3-add-yoy-chart
 
 然后在代码平台（CNB / GitHub / Gitee）上创建 Pull Request，由负责人 review 后合并到 `main`。
 
+### 命名与提交约定
+
+- 分支命名：`feature/<模块>-<简述>`（如 `feature/m3-yoy-chart`）、`fix/<问题>`、`docs/<内容>`。
+- 提交信息：一句话讲清改了什么，中文即可；涉及模块时把模块写在前面（如 `M3 增加环比折线图`）。
+- PR 标题用 `模块: 改动` 格式，描述里写清**为什么改、动了哪些文件、怎么验证**。
+- 协作者需要仓库的 **Write** 权限，否则 `git push` 会返回 403。权限由仓库负责人在 Settings → Collaborators 中授予。
+
 ### 用 WorkBuddy 协作改代码
 
 成员可在 WorkBuddy 新建任务时「选择工作空间」指向本仓库目录，然后用自然语言提需求，例如「给 M3 加一个环比折线图」「把主题改成深色」，WorkBuddy 会基于同一份代码修改。改完同样走分支 + PR 提交。
