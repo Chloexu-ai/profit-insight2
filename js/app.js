@@ -2,7 +2,7 @@
   const P = window.PA;
   let shellBound = false;
 
-  const MODULES = () => ({ m1: window.PAM1, m2: window.PAM2, m3: window.PAM3, m4: window.PAM4 });
+  const MODULES = () => ({ m1: window.PAM1, m2: window.PAM2, m3: window.PAM3, m4: window.PAM4, m5: window.PAM5, m6: window.PAM6 });
 
   const App = (window.PAApp = {
     async onSession(session) {
@@ -39,7 +39,9 @@
         m1: P.state.datasets.length > 0,
         m2: P.state.datasets.length > 0,
         m3: P.state.datasets.length > 0,
-        m4: P.state.datasets.length > 0
+        m4: P.state.datasets.length > 0,
+        m5: true,
+        m6: P.state.role === 'owner'
       };
       P.qsa('#module-nav .nav-item').forEach((b) => b.classList.toggle('ready', !!flags[b.dataset.module]));
     }
@@ -58,10 +60,22 @@
     P.state.members = await P.dbList(P.TABLES.members, { eq: { workspace_id: ws.id }, order: 'created_at' });
     const mine = P.state.members.find((m) => m.user_id === uid);
     if (mine && P.state.role !== 'owner') P.state.role = mine.role;
+    /* 数据视图：会话中手动预览优先，其次成员显式分配，最后按角色默认；owner 固定管理层 */
+    let viewKey = P.state.dataView;
+    if (!viewKey) {
+      if (P.state.role === 'owner') viewKey = 'management';
+      else if (mine && mine.data_view) viewKey = mine.data_view;
+      else viewKey = (window.PA_ROLE_VIEW && window.PA_ROLE_VIEW[P.state.role]) || 'management';
+      P.state.dataView = viewKey;
+    }
+    /* 加载本空间自定义主数据（若有则覆盖默认字典） */
+    await P.loadMasterdata(ws.id);
     P.state.datasets = await P.dbList(P.TABLES.datasets, { eq: { workspace_id: ws.id }, order: 'created_at', ascending: false });
     P.qs('#side-ws-name').textContent = ws.name;
-    P.qs('#side-role').textContent = P.state.role === 'owner' ? '空间所有者 · 可管理成员' :
+    const roleText = P.state.role === 'owner' ? '空间所有者 · 可管理成员' :
       P.state.role === 'editor' ? '编辑成员 · 可设计模块' : '只读成员 · 可查看数据';
+    const view = P.currentView();
+    P.qs('#side-role').textContent = roleText + ' · ' + (view ? view.label : '全量视图');
     const sel = P.qs('#workspace-select');
     if (sel) sel.value = String(ws.id);
     await Promise.allSettled([

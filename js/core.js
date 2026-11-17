@@ -3,13 +3,16 @@
 
   P.state = {
     session: null, user: null, workspaces: [], workspace: null,
-    members: [], role: 'viewer', datasets: [], models: [], activeModule: 'm1'
+    members: [], role: 'viewer', dataView: null, masterdata: null,
+    datasets: [], models: [], activeModule: 'm1'
   };
+  try { const sv = sessionStorage.getItem('pa_data_view'); if (sv) P.state.dataView = sv; } catch (e) {}
 
   P.TABLES = {
     workspaces: 'pa_workspaces', members: 'pa_members', datasets: 'pa_datasets',
     queries: 'pa_queries', dashboards: 'pa_dashboards',
-    pushRules: 'pa_push_rules', pushLogs: 'pa_push_logs'
+    pushRules: 'pa_push_rules', pushLogs: 'pa_push_logs',
+    masterdata: 'pa_masterdata'
   };
 
   /* ---------------- base helpers ---------------- */
@@ -242,19 +245,17 @@
 
   /* ---------------- data contract helpers ---------------- */
   const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[\s_\-—()（）\/\\.]/g, '');
-  const allFields = [
-    ...P_DICT_FIX().dimensions, ...P_DICT_FIX().metrics
-  ];
 
   function P_DICT_FIX() { return window.PA_DICT; }
 
   P.inferField = function (header) {
     const h = norm(header);
-    for (const f of allFields) {
-      if (f.aliases.some((a) => norm(a) === h)) return f.key;
+    const fields = P._allFields || [];
+    for (const f of fields) {
+      if ((f.aliases || []).some((a) => norm(a) === h)) return f.key;
     }
-    for (const f of allFields) {
-      if (f.aliases.some((a) => h && (h.includes(norm(a)) || norm(a).includes(h)))) return f.key;
+    for (const f of fields) {
+      if ((f.aliases || []).some((a) => h && (h.includes(norm(a)) || norm(a).includes(h)))) return f.key;
     }
     return null;
   };
@@ -279,6 +280,103 @@
     }
     const hit = (def.values || []).find((v) => norm(v) === n);
     return hit || raw;
+  };
+
+  /* ---------------- 科目编码 ---------------- */
+  function subjectDef() { return (window.PA_DICT.dimensions || []).find((d) => d.key === 'subject') || {}; }
+  P.subjectNameToCode = function (name) {
+    const def = subjectDef();
+    const idx = (def.values || []).indexOf(String(name == null ? '' : name).trim());
+    return idx >= 0 && def.codes ? def.codes[idx] : null;
+  };
+  P.subjectCodeToName = function (code) {
+    const def = subjectDef();
+    const s = String(code == null ? '' : code).trim();
+    const idx = def.codes ? def.codes.indexOf(s) : -1;
+    return idx >= 0 && def.values ? def.values[idx] : null;
+  };
+  /* 科目显示名：存储始终是标准汉字，编码仅用于上传录入 */
+  P.subjectDisplay = function (value) {
+    const name = P.subjectCodeToName(value) || value;
+    return name == null ? '' : String(name);
+  };
+
+  /* ---------------- 数据视图权限（科目级可见范围） ---------------- */
+  P.dataViews = function () { return window.PA_DATA_VIEWS || {}; };
+  P.currentViewKey = function () {
+    return P.state.dataView || (window.PA_ROLE_VIEW && window.PA_ROLE_VIEW[P.state.role]) || 'management';
+  };
+  P.currentView = function () {
+    const views = P.dataViews();
+    return views[P.currentViewKey()] || views.management || { key: 'management', subjectMode: 'all', label: '管理' };
+  };
+  P.setCurrentView = function (key) {
+    const views = P.dataViews();
+    if (!views[key]) return false;
+    P.state.dataView = key;
+    try { sessionStorage.setItem('pa_data_view', key); } catch (e) {}
+    return true;
+  };
+  /* 当前视图可见的科目标准名数组；null 表示全部可见 */
+  P.visibleSubjects = function () {
+    const v = P.currentView();
+    if (!v || v.subjectMode === 'all' || !v.subjectRange) return null;
+    const values = subjectDef().values || [];
+    const [a, b] = v.subjectRange;
+    const i = values.indexOf(a), j = values.indexOf(b);
+    if (i < 0 || j < 0) return values.slice();
+    return values.slice(Math.min(i, j), Math.max(i, j) + 1);
+  };
+  P.canSeeSubject = function (subject) {
+    const allowed = P.visibleSubjects();
+    if (!allowed) return true;
+    const name = P.subjectDisplay(subject);
+    return allowed.indexOf(name) >= 0;
+  };
+  /* 按当前视图过滤明细行：敏感科目行直接剔除，使问数/看板/预览一致受控 */
+  P.applyDataView = function (rows) {
+    const allowed = P.visibleSubjects();
+    if (!allowed) return rows || [];
+    return (rows || []).filter((r) => !r || !r.subject || r.subject === '未分类' || allowed.indexOf(P.subjectDisplay(r.subject)) >= 0);
+  };
+  /* 当前视图是否处于受限模式 */
+  P.isRestrictedView = function () { return !!P.visibleSubjects(); };
+
+  /* ---------------- 主数据在线维护 ---------------- */
+  P.defaultDict = function () {
+    if (!P._defaultDict) P._defaultDict = JSON.parse(JSON.stringify(window.PA_DICT));
+    return P._defaultDict;
+  };
+  /* 用云端配置覆盖字典：只覆盖 dimensions 的 values/codes/aliasesMap 与 derived/labels/meta */
+  P.applyMasterdata = function (cfg) {
+    if (!cfg || typeof cfg !== 'object') return false;
+    const d = JSON.parse(JSON.stringify(P.defaultDict()));
+    if (Array.isArray(cfg.dimensions)) {
+      cfg.dimensions.forEach((cd) => {
+        const target = d.dimensions.find((x) => x.key === cd.key);
+        if (!target) return;
+        if (Array.isArray(cd.values)) target.values = cd.values;
+        if (Array.isArray(cd.codes)) target.codes = cd.codes;
+        if (cd.aliasesMap && typeof cd.aliasesMap === 'object') target.aliasesMap = cd.aliasesMap;
+      });
+    }
+    if (cfg.derived && typeof cfg.derived === 'object') d.derived = cfg.derived;
+    window.PA_DICT = d;
+    P.state.masterdata = cfg;
+    rebuildFields();
+    return true;
+  };
+  P.restoreDefaultDict = function () {
+    window.PA_DICT = JSON.parse(JSON.stringify(P.defaultDict()));
+    P.state.masterdata = null;
+    rebuildFields();
+  };
+  P.loadMasterdata = async function (workspaceId) {
+    try {
+      const rows = await P.dbList(P.TABLES.masterdata, { eq: { workspace_id: workspaceId }, limit: 1 });
+      if (rows && rows.length && rows[0].dict_json) { P.applyMasterdata(rows[0].dict_json); return rows[0]; }
+    } catch (e) {}
+    return null;
   };
 
   P.parseNumber = function (v) {
@@ -311,11 +409,16 @@
 
   const numKeys = ['amount', 'revenue', 'cost', 'budget', 'budget_cost'];
   const dimKeys = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'period', 'region', 'product'];
-  const ALL_KEYS = [...dimKeys, ...numKeys];
-  P.ALL_KEYS = ALL_KEYS;
-  P.DIM_KEYS = dimKeys;
-  P.NUM_KEYS = numKeys;
-  P.TEMPLATE_KEYS = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'amount'];
+
+  function rebuildFields() {
+    const dict = window.PA_DICT || {};
+    P._allFields = [...(dict.dimensions || []), ...(dict.metrics || [])];
+    P.ALL_KEYS = [...dimKeys, ...numKeys];
+    P.DIM_KEYS = dimKeys;
+    P.NUM_KEYS = numKeys;
+    P.TEMPLATE_KEYS = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'amount'];
+  }
+  rebuildFields();
 
   function blankRow() {
     const row = {};
@@ -393,13 +496,13 @@
       /* 期间向后兼容：month 与 period 同步，保证旧看板「按期间趋势」可用 */
       if (row.month && row.month !== '未指定月份') row.period = row.month;
       deriveLegacyMeasures(row, found);
-      const sig = ALL_KEYS.map((k) => row[k]).join('|');
+      const sig = P.ALL_KEYS.map((k) => row[k]).join('|');
       if (seen.has(sig)) continue;
       seen.add(sig);
       rows.push(row);
     }
     if (bad) issues.push(bad + ' 个金额单元格无法解析，已按 0 处理');
-    return { rows, mapping, issues, columns: ALL_KEYS.filter((k) => found.has(k) || k === 'month') };
+    return { rows, mapping, issues, columns: P.ALL_KEYS.filter((k) => found.has(k) || k === 'month') };
   };
 
   P.metricValue = function (row, key) {

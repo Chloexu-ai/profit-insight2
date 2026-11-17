@@ -7,7 +7,7 @@
     init() {},
     mount(root) { render(root); },
     refresh() { if (currentRoot) render(currentRoot); },
-    destroy() { charts.forEach((c) => c.destroy && c.destroy()); charts = []; currentRoot = null; }
+    destroy() { charts.forEach((c) => c.destroy && c.destroy()); charts = []; currentRoot = null; document.removeEventListener('click', closeMsOutside); }
   });
 
   let currentRoot = null;
@@ -128,16 +128,27 @@
   function sourceRows() {
     const sel = P.qs('#m3-dataset', currentRoot);
     const id = sel ? sel.value : 'all';
-    if (id === 'all') return P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
-    const ds = P.state.datasets.find((d) => d.id === Number(id));
-    return ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    let rows;
+    if (id === 'all') rows = P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
+    else {
+      const ds = P.state.datasets.find((d) => d.id === Number(id));
+      rows = ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    }
+    /* 数据视图权限：业务端剔除敏感科目行 */
+    return P.applyDataView(rows);
   }
 
+  /* 归一化筛选值：既兼容旧的单值字符串，也支持新的数组（多选） */
+  function filterValues(v) {
+    if (v == null || v === '') return [];
+    return Array.isArray(v) ? v.filter((x) => x !== '' && x != null).map(String) : [String(v)];
+  }
   function applyFilters() {
     let rows = sourceRows();
     const f = current && current.filters ? current.filters : {};
     P.DIM_KEYS.forEach((k) => {
-      if (f[k]) rows = rows.filter((r) => String(r[k]) === String(f[k]));
+      const vals = filterValues(f[k]);
+      if (vals.length) rows = rows.filter((r) => vals.indexOf(String(r[k])) >= 0);
     });
     filteredRows = rows;
   }
@@ -158,13 +169,54 @@
     box.innerHTML = activeDims.map((k) => {
       const label = labels[k] || k;
       const vals = P.dimensionValues(rows, k).filter((v) => v && v !== (placeholder[k] || '未分类'));
-      return '<div><label class="tiny-text">' + label + '</label><select data-filter="' + k + '"><option value="">全部' + label + '</option>' +
-        vals.map((v) => '<option value="' + P.h(v) + '"' + (String(current.filters[k]) === String(v) ? ' selected' : '') + '>' + P.h(v) + '</option>').join('') + '</select></div>';
-    }).join('') + '<div class="spacer"></div><div class="tiny-text muted">当前 ' + rows.length + ' 行明细</div>';
-    P.qsa('[data-filter]', box).forEach((sel) => sel.onchange = () => {
-      current.filters[sel.dataset.filter] = sel.value;
-      renderWidgets();
+      const picked = filterValues(current.filters[k]);
+      const summary = picked.length === 0 ? '全部' + label : (picked.length === 1 ? picked[0] : label + ' · 已选 ' + picked.length + ' 项');
+      return '<div class="ms-filter" data-ms="' + k + '"><label class="tiny-text">' + label + '</label>' +
+        '<button type="button" class="ms-trigger" data-ms-trigger="' + k + '"><span class="ms-summary">' + P.h(summary) + '</span><span class="ms-caret">▾</span>' +
+        (picked.length ? '<span class="ms-count">' + picked.length + '</span>' : '') + '</button>' +
+        '<div class="ms-panel hidden" data-ms-panel="' + k + '">' +
+        '<div class="ms-actions"><button type="button" class="btn tiny ghost" data-ms-all="' + k + '">全选</button>' +
+        '<button type="button" class="btn tiny ghost" data-ms-clear="' + k + '">清空</button></div>' +
+        '<div class="ms-options">' + vals.map((v) => '<label class="ms-opt"><input type="checkbox" value="' + P.h(v) + '"' +
+          (picked.indexOf(String(v)) >= 0 ? ' checked' : '') + ' /><span>' + P.h(v) + '</span></label>').join('') + '</div></div></div>';
+    }).join('') + '<div class="spacer"></div>' +
+      (P.isRestrictedView() ? '<span class="badge warn tiny-text">受限视图 · 敏感科目已隐藏</span>' : '') +
+      '<div class="tiny-text muted">当前 ' + filteredRows.length + ' 行明细</div>';
+    wireMultiSelect(box);
+  }
+
+  function wireMultiSelect(box) {
+    /* 点击触发器：切换面板，点击外部关闭 */
+    P.qsa('[data-ms-trigger]', box).forEach((btn) => btn.onclick = (e) => {
+      e.stopPropagation();
+      const k = btn.dataset.msTrigger;
+      const panel = P.qs('[data-ms-panel="' + k + '"]', box);
+      const willOpen = panel.classList.contains('hidden');
+      P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
+      if (willOpen) panel.classList.remove('hidden');
     });
+    document.addEventListener('click', closeMsOutside);
+    /* 复选框变更：写回数组并刷新图表 */
+    P.qsa('[data-ms-panel]', box).forEach((panel) => {
+      const k = panel.dataset.msPanel;
+      P.qsa('input[type=checkbox]', panel).forEach((cb) => cb.onchange = () => {
+        current.filters[k] = P.qsa('input[type=checkbox]:checked', panel).map((x) => x.value);
+        renderFilters(); renderWidgets();
+      });
+      const all = P.qs('[data-ms-all="' + k + '"]', panel);
+      if (all) all.onclick = () => {
+        current.filters[k] = P.qsa('input[type=checkbox]', panel).map((x) => x.value);
+        renderFilters(); renderWidgets();
+      };
+      const clear = P.qs('[data-ms-clear="' + k + '"]', panel);
+      if (clear) clear.onclick = () => { delete current.filters[k]; renderFilters(); renderWidgets(); };
+    });
+  }
+  function closeMsOutside(e) {
+    if (!currentRoot) return;
+    const box = P.qs('#m3-filters', currentRoot);
+    if (!box) return;
+    if (!box.contains(e.target)) P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
   }
 
   function wireToolbar(root) {

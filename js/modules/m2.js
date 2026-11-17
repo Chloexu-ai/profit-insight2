@@ -86,9 +86,14 @@
   function selectedRows() {
     const sel = P.qs('#m2-dataset', currentRoot);
     const id = sel ? sel.value : 'all';
-    if (id === 'all') return P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
-    const ds = P.state.datasets.find((d) => d.id === Number(id));
-    return ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    let rows;
+    if (id === 'all') rows = P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
+    else {
+      const ds = P.state.datasets.find((d) => d.id === Number(id));
+      rows = ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    }
+    /* 数据视图权限：业务端问数时隐藏净利润等敏感科目 */
+    return P.applyDataView(rows);
   }
 
   async function loadHistory() {
