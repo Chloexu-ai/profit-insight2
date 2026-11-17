@@ -96,12 +96,11 @@
     } catch (e) { P.toast('文件解析失败：' + e.message, 'error'); }
   }
 
+  const TEMPLATE_HEADERS = ['月份', '品牌', '站点', '平台', '明细渠道', '素材来源', '品类', '报表产品', '属性', '值', '一级科目', '二级科目', '三级科目', '四级科目'];
+
   function loadSample() {
-    const headers = ['期间', '区域', '产品线', '渠道', '实际收入', '实际成本', '预算收入', '预算成本'];
-    rawRows = [headers].concat(P_SAMPLE().map((r) => headers.map((h) => {
-      const map = { '期间': 'period', '区域': 'region', '产品线': 'product', '渠道': 'channel', '实际收入': 'revenue', '实际成本': 'cost', '预算收入': 'budget', '预算成本': 'budget_cost' };
-      return r[map[h]];
-    })));
+    const headers = TEMPLATE_HEADERS;
+    rawRows = [headers].concat(P_SAMPLE().map((r) => headers.map((h) => r[h])));
     fileName = '示例经营数据.csv';
     override = null;
     cleaned = P.cleanRows(rawRows);
@@ -112,8 +111,11 @@
 
   function downloadTemplate() {
     const rows = [
-      ['期间', '区域', '产品线', '渠道', '实际收入', '实际成本', '预算收入', '预算成本'],
-      ['2026-01', '华东', '企业服务', '直销', 1000000, 620000, 950000, 600000]
+      TEMPLATE_HEADERS,
+      ['2026-01', '品牌A', '官网', '天猫', '直通车', '短视频A', '家电', '空调挂机', '实际收入', 1280000, '主营业务收入', '线上', '电商', '天猫'],
+      ['2026-01', '品牌A', '官网', '天猫', '直通车', '短视频A', '家电', '空调挂机', '实际成本', 842000, '主营业务成本', '线上', '电商', '天猫'],
+      ['2026-01', '品牌A', '官网', '天猫', '直通车', '短视频A', '家电', '空调挂机', '预算收入', 1200000, '预算收入', '线上', '电商', '天猫'],
+      ['2026-01', '品牌A', '官网', '天猫', '直通车', '短视频A', '家电', '空调挂机', '预算成本', 810000, '预算成本', '线上', '电商', '天猫']
     ];
     const csv = '\ufeff' + rows.map((r) => r.join(',')).join('\r\n');
     const a = document.createElement('a');
@@ -126,10 +128,11 @@
   function renderPreview(root) {
     const box = P.qs('#import-preview', root);
     if (!box || !cleaned) return;
-    const fields = [
-      ['period', '期间'], ['region', '区域'], ['product', '产品线'], ['channel', '渠道'],
-      ['revenue', '实际收入'], ['cost', '实际成本'], ['budget', '预算收入'], ['budget_cost', '预算成本']
-    ];
+    /* 映射面板：全部维度 + 属性/值 */
+    const fields = P.DIM_KEYS.map((k) => [k, P.dimLabel(k)]).concat([['__attr__', '属性'], ['__value__', '值']]);
+    /* 预览表：宽表行（长表已聚合），展示主要维度与指标 */
+    const tableFields = [['period', '期间'], ['brand', '品牌'], ['platform', '平台'], ['product', '报表产品'],
+      ['revenue', '实际收入'], ['cost', '实际成本'], ['budget', '预算收入'], ['budget_cost', '预算成本']];
     const reverse = {};
     Object.entries(cleaned.mapping).forEach(([h, k]) => { reverse[k] = h; });
     const headers = (rawRows && rawRows[0]) || [];
@@ -145,8 +148,8 @@
       P.h(fileName.replace(/\.[^.]+$/, '')) + '" /><label class="tiny-text">类型</label><select class="form-select" id="ds-kind" style="width:120px">' +
       '<option value="actual">实际数据</option><option value="budget">预算数据</option></select>' +
       '<button class="btn primary" id="do-import">确认入库</button><button class="btn" id="cancel-import">取消</button></div>' +
-      '<div class="table-wrap"><table><thead><tr>' + fields.map((f) => '<th>' + f[1] + '</th>').join('') + '</tr></thead><tbody>' +
-      cleaned.rows.slice(0, 8).map((r) => '<tr>' + fields.map((f) => '<td>' + P.h(r[f[0]]) + '</td>').join('') + '</tr>').join('') +
+      '<div class="table-wrap"><table><thead><tr>' + tableFields.map((f) => '<th>' + f[1] + '</th>').join('') + '</tr></thead><tbody>' +
+      cleaned.rows.slice(0, 8).map((r) => '<tr>' + tableFields.map((f) => '<td>' + P.h(r[f[0]]) + '</td>').join('') + '</tr>').join('') +
       '</tbody></table></div>';
     P.qsa('[data-map]', box).forEach((sel) => sel.onchange = () => {
       override = {};
@@ -190,8 +193,8 @@
       '<div class="kpi-inline"><div><span class="muted tiny-text">实际收入</span><b>' + P.fmtCompact(s.revenue) + '</b></div>' +
       '<div><span class="muted tiny-text">实际利润</span><b>' + P.fmtCompact(s.actual_profit) + '</b></div>' +
       '<div><span class="muted tiny-text">利润率</span><b>' + P.fmtPercent(s.margin) + '</b></div></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>期间</th><th>区域</th><th>产品线</th><th class="num">收入</th><th class="num">成本</th><th class="num">利润</th></tr></thead><tbody>' +
-      rows.slice(0, 30).map((r) => '<tr><td>' + P.h(r.period) + '</td><td>' + P.h(r.region) + '</td><td>' + P.h(r.product) +
+      '<div class="table-wrap"><table><thead><tr><th>期间</th><th>品牌</th><th>平台</th><th>报表产品</th><th class="num">收入</th><th class="num">成本</th><th class="num">利润</th></tr></thead><tbody>' +
+      rows.slice(0, 30).map((r) => '<tr><td>' + P.h(r.period) + '</td><td>' + P.h(r.brand) + '</td><td>' + P.h(r.platform) + '</td><td>' + P.h(r.product) +
         '</td><td class="num">' + P.fmtMoney(r.revenue) + '</td><td class="num">' + P.fmtMoney(r.cost) + '</td><td class="num">' +
         P.fmtMoney(P.metricValue(r, 'actual_profit')) + '</td></tr>').join('') + '</tbody></table></div>', 760);
     return m;

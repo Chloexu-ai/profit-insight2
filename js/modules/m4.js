@@ -137,7 +137,7 @@
   }
 
   function scheduleLabel(s) { return { daily: '每日 09:00', weekly: '每周一 09:00', monthly: '每月 1 日 09:00' }[s] || s; }
-  function dimLabel(k) { return { period: '期间', region: '区域', product: '产品线', channel: '渠道' }[k] || k; }
+  function dimLabel(k) { return P.dimLabel(k); }
 
   function startTimer() {
     if (timer) clearInterval(timer);
@@ -203,6 +203,6 @@
     offenders.sort((a, b) => a.value - b.value);
     const text = offenders.slice(0, 5).map((o) => o.label + ' ' + (o.unit === '%' ? o.value.toFixed(1) + '%' : P.fmtCompact(o.value))).join('；');
     return '触发条件：' + (OPS.find((x) => x.key === op) || {}).label + (op === 'variance_negative' ? '' : ' ' + threshold) +
-      '。命中对象：' + text + '。建议核查相关区域的收入结构与成本投入。';
+      '。命中对象：' + text + '。建议核查相关品牌/站点的收入结构与成本投入。';
   }
 })();

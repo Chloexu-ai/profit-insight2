@@ -242,8 +242,11 @@
 
   /* ---------------- data contract helpers ---------------- */
   const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[\s_\-—()（）\/\\.]/g, '');
+  /* 长表导入专用伪字段：属性列（填指标名）与值列（填金额） */
+  const ATTR_FIELD = { key: '__attr__', aliases: P_DICT_FIX().attrAliases || ['属性'] };
+  const VALUE_FIELD = { key: '__value__', aliases: P_DICT_FIX().valueAliases || ['值'] };
   const allFields = [
-    ...P_DICT_FIX().dimensions, ...P_DICT_FIX().metrics
+    ...P_DICT_FIX().dimensions, ...P_DICT_FIX().metrics, ATTR_FIELD, VALUE_FIELD
   ];
 
   function P_DICT_FIX() { return window.PA_DICT; }
@@ -288,11 +291,15 @@
   };
 
   const numKeys = allFields.filter((f) => ['revenue', 'cost', 'budget', 'budget_cost'].includes(f.key)).map((f) => f.key);
-  const dimKeys = allFields.filter((f) => ['period', 'region', 'product', 'channel'].includes(f.key)).map((f) => f.key);
+  const dimKeys = P_DICT_FIX().dimensions.map((f) => f.key);
   const ALL_KEYS = [...dimKeys, ...numKeys];
   P.ALL_KEYS = ALL_KEYS;
   P.DIM_KEYS = dimKeys;
   P.NUM_KEYS = numKeys;
+  P.dimLabel = function (key) {
+    const d = P_DICT_FIX().dimensions.find((x) => x.key === key);
+    return d ? d.label : key;
+  };
 
   P.cleanRows = function (rawRows, override) {
     const issues = [];
@@ -310,17 +317,73 @@
       Object.entries(override).forEach(([key, header]) => { if (header && headers.includes(header)) mapping[header] = key; });
     }
     const found = new Set(Object.values(mapping));
-    if (![...numKeys].some((k) => found.has(k))) issues.push('未识别到任何金额字段（收入/成本/预算）');
     const unmapped = headers.filter((h) => !mapping[h]);
     if (unmapped.length) issues.push('未映射列：' + unmapped.join('、'));
 
+    /* 长表格式：属性列填指标名，值列填金额 → 按维度聚合转宽表 */
+    const isLong = found.has('__attr__') && found.has('__value__');
+    if (isLong) {
+      const attrIdx = headers.findIndex((h) => mapping[h] === '__attr__');
+      const valueIdx = headers.findIndex((h) => mapping[h] === '__value__');
+      const dimIdx = {};
+      Object.entries(mapping).forEach(([h, k]) => { if (dimKeys.includes(k)) dimIdx[k] = headers.indexOf(h); });
+      /* 科目层级描述的是每条金额行本身，不同指标（收入/成本/预算）的科目不同；
+         因此指标按「非科目维度」聚合，科目列在同组内去重合并，保证行级利润计算正确 */
+      const subjKeys = dimKeys.filter((k) => k.indexOf('subject') === 0);
+      const groupDims = dimKeys.filter((k) => !subjKeys.includes(k));
+      const groups = new Map();
+      let matched = 0, bad = 0;
+      const unknownAttrs = {};
+      for (let i = 1; i < rawRows.length; i++) {
+        const raw = rawRows[i];
+        if (!raw || raw.every((v) => v == null || String(v).trim() === '')) continue;
+        const attrName = raw[attrIdx] == null ? '' : String(raw[attrIdx]).trim();
+        const metricKey = attrName ? P.inferField(attrName) : null;
+        const numOk = metricKey && numKeys.includes(metricKey);
+        if (attrName && !numOk) unknownAttrs[attrName] = (unknownAttrs[attrName] || 0) + 1;
+        const rawVal = valueIdx >= 0 ? raw[valueIdx] : '';
+        const n = P.parseNumber(rawVal);
+        if (rawVal !== '' && rawVal != null && !isFinite(Number(String(rawVal).replace(/[,¥￥\s]/g, '')))) bad += 1;
+        if (!numOk) continue;
+        matched += 1;
+        const row = {};
+        groupDims.forEach((k) => {
+          const v = dimIdx[k] === undefined ? '' : raw[dimIdx[k]];
+          row[k] = k === 'period' ? P.parsePeriod(v) : (v == null || String(v).trim() === '' ? '未分类' : String(v).trim());
+        });
+        subjKeys.forEach((k) => { row[k] = []; });
+        numKeys.forEach((k) => { row[k] = 0; });
+        const sig = groupDims.map((k) => row[k]).join('|');
+        if (!groups.has(sig)) groups.set(sig, row);
+        const g = groups.get(sig);
+        g[metricKey] += n;
+        subjKeys.forEach((k) => {
+          const v = dimIdx[k] === undefined ? '' : (raw[dimIdx[k]] == null ? '' : String(raw[dimIdx[k]]).trim());
+          if (v && g[k].indexOf(v) === -1) g[k].push(v);
+        });
+      }
+      Object.entries(unknownAttrs).forEach(([a, c]) => issues.push('属性「' + a + '」不是收入/成本/预算类指标，' + c + ' 行已跳过'));
+      if (!matched) issues.push('未识别到任何有效指标属性（属性列需填收入/成本/预算收入/预算成本等指标名）');
+      if (bad) issues.push(bad + ' 个金额单元格无法解析，已按 0 处理');
+      const rows = Array.from(groups.values()).map((g) => {
+        subjKeys.forEach((k) => { g[k] = g[k].length ? g[k].join('、') : '未分类'; });
+        return g;
+      });
+      const foundDims = dimKeys.filter((k) => dimIdx[k] !== undefined);
+      return { rows, mapping, issues, columns: foundDims.concat(numKeys) };
+    }
+
+    /* 宽表格式：每个金额字段各占一列（兼容旧模板） */
+    if (![...numKeys].some((k) => found.has(k))) issues.push('未识别到任何金额字段（收入/成本/预算）');
     const rows = [];
     const seen = new Set();
     let bad = 0;
     for (let i = 1; i < rawRows.length; i++) {
       const raw = rawRows[i];
       if (!raw || raw.every((v) => v == null || String(v).trim() === '')) continue;
-      const row = { period: '未指定期间', region: '未分类', product: '未分类', channel: '未分类', revenue: 0, cost: 0, budget: 0, budget_cost: 0 };
+      const row = {};
+      dimKeys.forEach((k) => { row[k] = k === 'period' ? '未指定期间' : '未分类'; });
+      numKeys.forEach((k) => { row[k] = 0; });
       headers.forEach((h, idx) => {
         const key = mapping[h];
         if (!key) return;
