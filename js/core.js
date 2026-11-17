@@ -437,9 +437,10 @@
   P.isRestrictedView = function () { return !!P.visibleSubjects(); };
 
   /* 当前视图可见的科目编码数组（注册表编码）；全部可见返回 null
-   * 判定规则：科目名称命中白名单，或科目一级名称（path[0]）命中白名单。
+   * 判定规则：只看科目名称是否命中旧白名单。**不按一级科目名向下放开**——
+   * 「销售费用」可见不代表其下 100+ 个明细科目可见，否则等于放宽数据权限。
    * 注册表未加载时返回 null，由调用方回退到旧名称口径（P.canSeeSubject）。
-   * 原则：只做「收窄」，拿不准一律判不可见，绝不因新编码而放宽权限。 */
+   * 原则：只做「收窄」，拿不准一律判不可见。 */
   P.visibleSubjectCodes = function () {
     const allowed = P.visibleSubjects();
     if (!allowed) return null;
@@ -447,7 +448,7 @@
     if (!reg) return null;
     const set = {};
     allowed.forEach((n) => { set[n] = true; });
-    return (reg.list || []).filter((s) => set[s.name] || (s.path && s.path[0] && set[s.path[0]])).map((s) => s.code);
+    return (reg.list || []).filter((s) => set[s.name]).map((s) => s.code);
   };
 
   /* 单条科目编码是否可见：支持新 6~10 位编码，也兼容旧 4 位编码 */
@@ -465,7 +466,7 @@
       subject = res.match && reg.byCode[res.code] ? reg.byCode[res.code] : null;
     }
     if (!subject) return false;
-    return allowed.indexOf(subject.name) >= 0 || (subject.path && allowed.indexOf(subject.path[0]) >= 0);
+    return allowed.indexOf(subject.name) >= 0;
   };
 
   /* ---------------- 主数据在线维护 ---------------- */
