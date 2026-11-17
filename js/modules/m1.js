@@ -18,6 +18,26 @@
 
   const TEMPLATE_HEADERS = () => window.PA_TEMPLATE_HEADERS || ['月份','数据类型','站点/国家','平台','渠道','素材来源','品牌','品类','报表产品','科目','金额'];
   const LABEL = () => window.PA_DIM_LABELS || {};
+  const SUBJECT_UNIT_LABEL = { money: '金额', quantity: '数量', headcount: '人数' };
+
+  function csvCell(c) {
+    const s = String(c == null ? '' : c);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function downloadCsv(rows, filename) {
+    const csv = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  /* 科目名称 → 编码：优先 201 条注册表，其次旧 43 条简化编码 */
+  function subjectCodeFor(name) {
+    const res = P.resolveSubjectValue ? P.resolveSubjectValue(name) : null;
+    if (res && res.match) return res.code;
+    return P.subjectNameToCode(name) || '';
+  }
   /* 预览/映射展示的字段：管报维度 + 金额 + 兼容指标 */
   const VIEW_FIELDS = [
     ['month', '月份'], ['data_type', '数据类型'], ['site', '站点/国家'], ['platform', '平台'],
@@ -114,7 +134,7 @@
     const headers = TEMPLATE_HEADERS();
     const map = { '月份':'month','数据类型':'data_type','站点/国家':'site','平台':'platform','渠道':'channel','素材来源':'material','品牌':'brand','品类':'category','报表产品':'report_product','科目':'subject','科目编码':'subject','金额':'amount' };
     rawRows = [headers].concat(window.PA_SAMPLE_ROWS.map((r) => headers.map((h) => h === '科目编码'
-      ? (P.subjectNameToCode(r.subject) || r.subject)
+      ? (subjectCodeFor(r.subject) || r.subject)
       : r[map[h]])));
     fileName = '管报示例数据.csv';
     override = null;
@@ -127,28 +147,47 @@
     const headers = TEMPLATE_HEADERS();
     const rows = [
       headers,
-      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',P.subjectNameToCode('销售收入') || '1101',1280000],
-      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',P.subjectNameToCode('产品成本-内核法') || '2101',842000],
-      ['1月','预算数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',P.subjectNameToCode('销售收入') || '1101',1200000]
+      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',subjectCodeFor('销售收入') || '6001',1280000],
+      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',subjectCodeFor('产品成本-内核法') || '6401',842000],
+      ['1月','预算数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',subjectCodeFor('销售收入') || '6001',1200000]
     ];
-    const csv = '\ufeff' + rows.map((r) => r.map((c) => String(c).indexOf(',') >= 0 ? '"' + c + '"' : c).join(',')).join('\r\n');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    a.download = '管报数据导入模板.csv';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    downloadCsv(rows, '管报数据导入模板.csv');
   }
 
-  /* 科目编码对照表下载，供业务填表查阅 */
+  /* 科目编码对照表：导出 management-v1 全量 201 条，供业务填表查阅 */
   function downloadSubjectCodes() {
-    const def = (window.PA_DICT.dimensions || []).find((d) => d.key === 'subject') || {};
-    const rows = [['科目编码','科目名称']].concat((def.values || []).map((v, i) => [def.codes ? def.codes[i] : '', v]));
-    const csv = '\ufeff' + rows.map((r) => r.map((c) => String(c).indexOf(',') >= 0 ? '"' + c + '"' : c).join(',')).join('\r\n');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    a.download = '科目编码对照表.csv';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const reg = P.reportRegistry();
+    let rows;
+    if (reg && (reg.list || []).length) {
+      rows = [['科目编码','科目名称','一级科目','完整路径','层级','单位']].concat((reg.list || []).map((s) => [
+        s.code, s.name, (s.path && s.path[0]) || '', (s.path || []).join('｜'), s.level, SUBJECT_UNIT_LABEL[s.unit] || s.unit || ''
+      ]));
+    } else {
+      /* 注册表未加载时退回旧 43 条，保证按钮不失效 */
+      const def = (window.PA_DICT.dimensions || []).find((d) => d.key === 'subject') || {};
+      rows = [['科目编码','科目名称','一级科目','完整路径','层级','单位']].concat((def.values || []).map((v, i) => [
+        def.codes ? def.codes[i] : '', v, '', v, '', '金额'
+      ]));
+      P.toast('科目注册表未加载，已导出旧版 43 条科目', 'warn');
+    }
+    downloadCsv(rows, '科目编码对照表.csv');
+  }
+
+  /* 科目注册表统计：201 条、层级分布、重名提示 */
+  function subjectStatsHtml() {
+    const reg = P.reportRegistry();
+    if (!reg) return '<div class="alert info">科目注册表（js/report/subjects.js）未加载，暂按旧版 43 条科目编码展示。</div>';
+    const levels = { 1: 0, 2: 0, 3: 0, 4: 0 };
+    (reg.list || []).forEach((s) => { if (levels[s.level] != null) levels[s.level] += 1; });
+    const dups = reg.duplicates || [];
+    const dupSample = dups.slice(0, 6).join('、');
+    return '<div class="alert info"><b>科目模板 ' + P.h(reg.version) + ' · 共 ' + reg.size + ' 条</b>' +
+      '<div class="tiny-text" style="margin-top:6px">层级分布：一级 ' + levels[1] + ' 条 / 二级 ' + levels[2] + ' 条 / 三级 ' + levels[3] + ' 条 / 四级 ' + levels[4] + ' 条</div>' +
+      '<div class="tiny-text" style="margin-top:4px">重名科目 ' + dups.length + ' 组' + (dupSample ? '（如 ' + P.h(dupSample) + ' 等）' : '') +
+      '：<b>同名不同编码，必须按编码区分，不能按名称合并</b>。</div>' +
+      ((reg.anomalies || []).length ? '<div class="tiny-text" style="margin-top:4px">模板结构异常 ' + reg.anomalies.length + ' 行：编码 ' +
+        P.h(reg.anomalies.map((a) => a.code).join('、')) + '（编码层级与文字层级不一致，按编码层级归档）</div>' : '') +
+      '</div>';
   }
 
   function viewMaster() {
@@ -161,9 +200,10 @@
     }).join('');
     P.openModal('管报主数据字典（维度与取值）',
       '<p class="tiny-text muted">导入时系统已按此字典自动规范化：编码（如 C10/S33/T02）、别名（如「德国」「速卖通」）与大小写都会转换为标准值；德国编码 DE 统一为 GE。</p>' +
+      subjectStatsHtml() +
       '<div class="table-wrap"><table><thead><tr><th>维度</th><th>字段</th><th>标准取值</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<p class="tiny-text muted" style="margin-top:10px">数据类型：实际数 / 预算数 / 预测数；金额 + 科目 + 数据类型会自动归集出实际收入、成本与预算指标，供 M2/M3/M4 使用。</p>' +
-      '<p class="tiny-text muted" style="margin-top:8px"><b>科目请用编码录入</b>（如 1101=销售收入、2101=产品成本-内核法、3102=销售毛利-内核法、5102=净利润-内核法）：编码比汉字更不易写错，上传后界面自动显示为标准名称。完整对照可点「科目编码表」下载。</p>', 760);
+      '<p class="tiny-text muted" style="margin-top:8px"><b>科目请用编码录入</b>（如 6001=销售收入、6401=产品成本-内核法、4102=销售毛利-内核法、6602010101=平台佣金）：编码能区分同名科目，比汉字更不易写错，上传后界面自动显示为标准名称。完整 201 条对照可点「科目编码表」下载。</p>', 760);
   }
 
   function renderPreview(root) {
@@ -188,8 +228,8 @@
       cleaned.rows.slice(0, 8).map((r) => '<tr>' + VIEW_FIELDS.map((f) => {
         let cell = r[f[0]];
         if (f[0] === 'subject' && cell) {
-          const code = P.subjectNameToCode(cell);
-          cell = code ? cell + ' (' + code + ')' : cell;
+          const code = r.subject_code || P.subjectNameToCode(cell);
+          if (code) cell = cell + ' (' + code + ')';
         }
         return '<td>' + P.h(cell) + '</td>';
       }).join('') + '</tr>').join('') +

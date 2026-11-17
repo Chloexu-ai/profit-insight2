@@ -141,3 +141,17 @@ window.PA_SAMPLE_ROWS = [
   { month:'3月', data_type:'预算数', site:'US', platform:'Amazon', channel:'Amazon货架销售', material:'', brand:'GLOSTAR', category:'美白祛斑', report_product:'美白精华', subject:'销售收入', amount:1320000, revenue:0, cost:0, budget:1320000, budget_cost:0 },
   { month:'3月', data_type:'预算数', site:'US', platform:'Amazon', channel:'Amazon货架销售', material:'', brand:'GLOSTAR', category:'美白祛斑', report_product:'美白精华', subject:'产品成本-内核法', amount:950000, revenue:0, cost:0, budget:0, budget_cost:950000 }
 ];
+
+/* ===================================================================
+ * 管报科目模板元信息（management-v1）
+ * 完整 201 条科目注册表见 js/report/subjects.js（window.PA_REPORT_SUBJECTS），
+ * 这里只登记模板级元信息，供 M1 导入说明与 M3 管报页脚展示。
+ * =================================================================== */
+window.PA_REPORT_TEMPLATE = {
+  version: 'management-v1',
+  source: '《管报格式.xlsx》Sheet1',
+  rowCount: 201,
+  periods: 'monthly',
+  note: '四级科目按编码长度定级（4/6/8/10 位 → 1/2/3/4 级），同名科目必须按编码区分；金额(money)、数量(quantity)、人数(headcount) 三类单位不得混合汇总。'
+};
+
