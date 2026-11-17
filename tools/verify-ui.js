@@ -85,6 +85,13 @@ console.log('\n[6] 全选语义');
 dom = dump('select-all-month');
 ok(dom.indexOf('已选 3 项') > 0, '月份全选后显示已选 3 项');
 
+/* ---------------- 7. 无数据仍出全 0 管报 ---------------- */
+console.log('\n[7] 无匹配数据时的管报');
+dom = dump('none-report');
+ok(count(dom, '<tr') >= 200, '无匹配数据仍渲染 201 行（实际 ' + count(dom, '<tr') + ' 行）');
+ok(dom.indexOf('未生成月份列') > 0, '说明为什么没有月份列');
+ok(dom.indexOf('全部为 0') > 0, '说明模板行全部为 0');
+
 console.log('\n----------------------------------------');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 if (fail) { console.log('存在失败项'); process.exit(1); }

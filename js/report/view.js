@@ -206,10 +206,14 @@
     var rows = Array.isArray(matrix.rows) ? matrix.rows : [];
     var columns = Array.isArray(matrix.columns) ? matrix.columns : [];
 
-    if (!columns.length || !rows.length) {
+    if (!rows.length) {
       el.innerHTML = emptyBox('当前筛选条件下没有可展示的科目数据');
       return { destroy: function () {} };
     }
+    /* 有模板行但没有月份列（未指定月份且数据中无期间）：仍展示模板行，并说明原因 */
+    var noColsNote = columns.length ? '' :
+      '<div class="rpt-diag rpt-diag-warn">当前筛选条件没有匹配的明细，模板 ' + rows.length +
+      ' 行全部为 0。因未指定月份且数据中没有可识别的期间，未生成月份列。</div>';
 
     var total = rows.length;
     var limit = Number(options.maxRows) > 0 ? Number(options.maxRows) : total;
@@ -244,7 +248,7 @@
         tds + '</tr>';
     }).join('');
 
-    el.innerHTML = toolbar +
+    el.innerHTML = toolbar + noColsNote +
       '<div class="rpt-wrap">' +
       '<table class="rpt-table rpt-matrix"><thead>' + headRows(groups, lead) + '</thead>' +
       '<tbody>' + body + '</tbody></table></div>';
@@ -408,10 +412,13 @@
     var rows = Array.isArray(matrix.rows) ? matrix.rows : [];
     var columns = Array.isArray(matrix.columns) ? matrix.columns : [];
 
-    if (!columns.length || !rows.length) {
+    if (!rows.length) {
       el.innerHTML = emptyBox('当前模板下没有可生成的管报数据');
       return { destroy: function () {} };
     }
+    var noColsNote = columns.length ? '' :
+      '<div class="rpt-diag rpt-diag-warn">当前筛选条件没有匹配的明细，模板 ' + rows.length +
+      ' 行全部为 0。因未指定月份且数据中没有可识别的期间，未生成月份列。</div>';
 
     var groups = groupColumns(columns);
     var lead = '<th class="rpt-sticky-1 rpt-th-corner" rowspan="2">一级科目</th>' +
@@ -452,7 +459,7 @@
         tds + '</tr>';
     }).join('');
 
-    el.innerHTML = '<div class="rpt-wrap">' +
+    el.innerHTML = noColsNote + '<div class="rpt-wrap">' +
       '<table class="rpt-table rpt-report"><thead>' + headRows(groups, lead) + '</thead>' +
       '<tbody>' + body + '</tbody></table></div>';
 

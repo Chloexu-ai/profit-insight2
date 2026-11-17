@@ -90,6 +90,10 @@
     if (act === 'chart' || act === 'matrix' || act === 'report') acted.push(click('[data-view="' + act + '"]'));
     if (act === 'select-all-month') { click('[data-ms-trigger="month"]'); acted.push(click('[data-ms-all="month"]')); }
     if (act === 'select-none-site') { click('[data-ms-trigger="site"]'); acted.push(click('[data-ms-none="site"]')); }
+    if (act === 'none-report') {
+      click('[data-ms-trigger="site"]'); click('[data-ms-none="site"]');
+      acted.push(click('[data-view="report"]'));
+    }
     if (act === 'pick-two-site') {
       click('[data-ms-trigger="site"]');
       var cbs = document.querySelectorAll('[data-ms-panel="site"] input[type=checkbox]');
