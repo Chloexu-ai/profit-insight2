@@ -154,23 +154,25 @@
     downloadCsv(rows, '管报数据导入模板.csv');
   }
 
-  /* 科目编码对照表：导出 management-v1 全量 201 条，供业务填表查阅 */
+  /* 科目编码对照表下载：优先导出完整科目树（含四级），否则退回统计科目表 */
   function downloadSubjectCodes() {
-    const reg = P.reportRegistry();
     let rows;
-    if (reg && (reg.list || []).length) {
-      rows = [['科目编码','科目名称','一级科目','完整路径','层级','单位']].concat((reg.list || []).map((s) => [
-        s.code, s.name, (s.path && s.path[0]) || '', (s.path || []).join('｜'), s.level, SUBJECT_UNIT_LABEL[s.unit] || s.unit || ''
-      ]));
+    const tree = window.PA_SUBJECT_TREE;
+    if (Array.isArray(tree) && tree.length) {
+      rows = [['科目编码', '一级科目', '二级科目', '三级科目', '四级科目', '科目名称']].concat(tree.map((o) => {
+        const p = o.p || [];
+        return [o.c, p[0] || '', p[1] || '', p[2] || '', p[3] || '', o.n];
+      }));
     } else {
-      /* 注册表未加载时退回旧 43 条，保证按钮不失效 */
       const def = (window.PA_DICT.dimensions || []).find((d) => d.key === 'subject') || {};
-      rows = [['科目编码','科目名称','一级科目','完整路径','层级','单位']].concat((def.values || []).map((v, i) => [
-        def.codes ? def.codes[i] : '', v, '', v, '', '金额'
-      ]));
-      P.toast('科目注册表未加载，已导出旧版 43 条科目', 'warn');
+      rows = [['科目编码','科目名称']].concat((def.values || []).map((v, i) => [def.codes ? def.codes[i] : '', v]));
     }
-    downloadCsv(rows, '科目编码对照表.csv');
+    const csv = '\ufeff' + rows.map((r) => r.map((c) => String(c == null ? '' : c).indexOf(',') >= 0 ? '"' + c + '"' : c).join(',')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = '科目编码对照表.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   /* 科目注册表统计：201 条、层级分布、重名提示 */
@@ -203,7 +205,7 @@
       subjectStatsHtml() +
       '<div class="table-wrap"><table><thead><tr><th>维度</th><th>字段</th><th>标准取值</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<p class="tiny-text muted" style="margin-top:10px">数据类型：实际数 / 预算数 / 预测数；金额 + 科目 + 数据类型会自动归集出实际收入、成本与预算指标，供 M2/M3/M4 使用。</p>' +
-      '<p class="tiny-text muted" style="margin-top:8px"><b>科目请用编码录入</b>（如 6001=销售收入、6401=产品成本-内核法、4102=销售毛利-内核法、6602010101=平台佣金）：编码能区分同名科目，比汉字更不易写错，上传后界面自动显示为标准名称。完整 201 条对照可点「科目编码表」下载。</p>', 760);
+      '<p class="tiny-text muted" style="margin-top:8px"><b>科目请用编码录入</b>（编码来自你的《管报主数据及定义.xlsx》科目主数据，如 6001=销售收入、6401=产品成本-内核法、4102=销售毛利-内核法、9002=净利润-内核法，支持四级明细如 6602010101=平台佣金）：编码比汉字更不易写错，上传后界面自动显示为标准名称。完整对照可点「科目编码表」下载；如主数据有更新，请到 M6「从 Excel 导入科目主数据」重新导入。</p>', 760);
   }
 
   function renderPreview(root) {
