@@ -297,8 +297,44 @@
   };
   /* 科目显示名：存储始终是标准汉字，编码仅用于上传录入 */
   P.subjectDisplay = function (value) {
-    const name = P.subjectCodeToName(value) || value;
+    const s = String(value == null ? '' : value).trim();
+    const def = subjectDef();
+    /* 编码 → 名称：先查统计 codes，再查全量别名映射（覆盖四级明细编码） */
+    const name = P.subjectCodeToName(s) || (def.aliasesMap && (def.aliasesMap[s] || def.aliasesMap[s.toLowerCase()])) || s;
     return name == null ? '' : String(name);
+  };
+  /* 从科目树重建 subject 字典（用户导入科目主数据时调用）。
+     tree: [{c:编码, n:末级名, p:[路径...], l:一级科目}]
+     - values/codes：取一级科目（l1，去重保序）作为统计口径锚点，保持权限区间可判定
+     - aliasesMap：全部编码→末级名（真实编码优先）+ 汉字名→自身 + 旧编码兼容 */
+  P.buildSubjectDictFromTree = function (tree) {
+    if (!Array.isArray(tree) || !tree.length) return null;
+    const l1 = [], seen = new Set();
+    tree.forEach((o) => {
+      const name = String(o.l || (o.p && o.p[0]) || o.n || '').trim();
+      if (name && !seen.has(name)) { seen.add(name); l1.push(name); }
+    });
+    const values = l1.length ? l1 : tree.map((o) => String(o.n));
+    const amap = {};
+    const realCodes = new Set();
+    tree.forEach((o) => {
+      const code = String(o.c == null ? '' : o.c).trim();
+      const name = String(o.n == null ? '' : o.n).trim();
+      if (code) { realCodes.add(code); amap[code] = name; }
+      if (name) amap[name] = name;
+      (o.p || []).forEach((seg) => { const s = String(seg).trim(); if (s) amap[s] = s; });
+    });
+    /* 旧预设编码兼容：仅在不与真实编码冲突时加入（用默认 codes↔values 对应关系） */
+    const defaultSub = (P.defaultDict().dimensions || []).find((d) => d.key === 'subject') || {};
+    const defValues = defaultSub.values || [];
+    const defCodes = defaultSub.codes || [];
+    defCodes.forEach((c, i) => { if (c && !realCodes.has(c) && defValues[i] && !amap[c]) amap[c] = defValues[i]; });
+    return { values: values, codes: values.map((v) => {
+      /* 一级科目对应的真实编码：取树中 l==v 且层级最短的编码 */
+      const hits = tree.filter((o) => String(o.l || (o.p && o.p[0]) || '') === v);
+      hits.sort((a, b) => (a.p || []).length - (b.p || []).length);
+      return hits.length ? String(hits[0].c) : '';
+    }), aliasesMap: amap, tree: tree };
   };
 
   /* ---------------- 数据视图权限（科目级可见范围） ---------------- */
@@ -347,6 +383,8 @@
     if (!P._defaultDict) P._defaultDict = JSON.parse(JSON.stringify(window.PA_DICT));
     return P._defaultDict;
   };
+  /* 首次加载即缓存默认科目树，确保恢复默认不受自定义导入影响 */
+  if (P._defaultSubjectTree == null) P._defaultSubjectTree = JSON.parse(JSON.stringify(window.PA_SUBJECT_TREE || []));
   /* 用云端配置覆盖字典：只覆盖 dimensions 的 values/codes/aliasesMap 与 derived/labels/meta */
   P.applyMasterdata = function (cfg) {
     if (!cfg || typeof cfg !== 'object') return false;
@@ -361,6 +399,7 @@
       });
     }
     if (cfg.derived && typeof cfg.derived === 'object') d.derived = cfg.derived;
+    if (Array.isArray(cfg.subjectTree)) window.PA_SUBJECT_TREE = cfg.subjectTree;
     window.PA_DICT = d;
     P.state.masterdata = cfg;
     rebuildFields();
@@ -368,6 +407,8 @@
   };
   P.restoreDefaultDict = function () {
     window.PA_DICT = JSON.parse(JSON.stringify(P.defaultDict()));
+    if (P._defaultSubjectTree == null) P._defaultSubjectTree = JSON.parse(JSON.stringify(window.PA_SUBJECT_TREE || []));
+    window.PA_SUBJECT_TREE = JSON.parse(JSON.stringify(P._defaultSubjectTree));
     P.state.masterdata = null;
     rebuildFields();
   };

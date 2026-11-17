@@ -18,7 +18,10 @@
 
   function render(root) {
     currentRoot = root;
-    if (!draft) draft = deepDict();
+    if (!draft) {
+      draft = deepDict();
+      if (P.state.masterdata && P.state.masterdata.subjectTree) draft.subjectTree = JSON.parse(JSON.stringify(P.state.masterdata.subjectTree));
+    }
     const dims = draft.dimensions || [];
     const isOwner = P.state.role === 'owner';
     const custom = !!P.state.masterdata;
@@ -32,10 +35,14 @@
       '<div class="alert info tiny-text">按业务场景维护各维度的标准取值、别名与编码。保存后写入本协作空间，M1 导入规范化、M3 筛选器、M2 问数口径会自动使用新字典；其他空间不受影响。</div>' +
       '<div class="md-layout"><aside class="md-side">' + side + '</aside><div class="md-main" id="md-main"></div></div>' +
       '<div class="row end" style="margin-top:14px">' +
+      (isOwner ? '<button class="btn" id="md-import-subject">从 Excel 导入科目主数据</button>' : '') +
       '<button class="btn" id="md-export">导出 JSON</button>' +
       '<button class="btn" id="md-reset">恢复系统默认</button>' +
       (isOwner ? '<button class="btn primary" id="md-save">保存到协作空间</button>' : '<span class="tiny-text muted">仅空间所有者可保存</span>') +
-      '</div></div>';
+      '</div>' +
+      '<input type="file" id="md-subject-file" accept=".xlsx,.xls,.csv" style="display:none" />' +
+      '<p class="tiny-text muted" style="margin-top:8px">「从 Excel 导入科目主数据」：上传《管报主数据及定义.xlsx》，自动识别「科目主数据」sheet 的四级科目与编码列，重建科目编码体系；导入后需点「保存到协作空间」才对全空间生效。</p>' +
+      '</div>';
     renderEditor();
     wire(root);
   }
@@ -115,6 +122,7 @@
       const cfg = { dimensions: draft.dimensions.map((d) => ({
         key: d.key, values: d.values, codes: d.codes, aliasesMap: d.aliasesMap
       })) };
+      if (draft.subjectTree && draft.subjectTree.length) cfg.subjectTree = draft.subjectTree;
       save.disabled = true; save.textContent = '保存中…';
       try {
         const ws = P.state.workspace.id;
@@ -146,5 +154,70 @@
       a.href = URL.createObjectURL(blob); a.download = '管报主数据字典.json'; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     };
+    const importBtn = P.qs('#md-import-subject', root);
+    const fileInput = P.qs('#md-subject-file', root);
+    if (importBtn && fileInput) {
+      importBtn.onclick = () => fileInput.click();
+      fileInput.onchange = () => { if (fileInput.files && fileInput.files[0]) importSubjectFile(fileInput.files[0]); fileInput.value = ''; };
+    }
+  }
+
+  /* 解析用户上传的科目主数据 Excel，重建 subject 字典。
+     自动定位「科目主数据」sheet；识别「科目编码」列 + 一级/二级/三级/四级科目列；
+     也兼容 CSV 与无表头 multilingual 情况：编码列=首个全为数字的列，科目列=其前的文本列。 */
+  async function importSubjectFile(file) {
+    try {
+      if (typeof XLSX === 'undefined') { P.toast('Excel 解析组件未加载，请刷新页面重试', 'error'); return; }
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      /* 优先选「科目主数据」sheet，否则遍历所有 sheet 找含编码列的 */
+      let sheet = wb.Sheets['科目主数据'];
+      let rows = sheet ? XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false }) : [];
+      if (!rows.length) {
+        for (const nm of wb.SheetNames) {
+          const r = XLSX.utils.sheet_to_json(wb.Sheets[nm], { header: 1, defval: '', raw: false });
+          if (detectCodeCol(r) >= 0) { rows = r; break; }
+        }
+      }
+      const codeCol = detectCodeCol(rows);
+      if (codeCol < 0) { P.toast('未识别到科目编码列（需一列全为数字编码，如 6001 / 6602010101）', 'error'); return; }
+      const nameCols = [];
+      for (let c = 0; c < codeCol; c++) nameCols.push(c);
+      if (!nameCols.length) { P.toast('未识别到科目名称列（编码列左侧应有科目名称列）', 'error'); return; }
+      /* 跳过表头行：找到第一行编码列是纯数字的行 */
+      let start = 0;
+      for (let i = 0; i < rows.length; i++) { if (/^\d+$/.test(String(rows[i][codeCol] || '').trim())) { start = i; break; } }
+      const tree = [];
+      for (let i = start; i < rows.length; i++) {
+        const code = String(rows[i][codeCol] == null ? '' : rows[i][codeCol]).trim();
+        if (!/^\d+$/.test(code)) continue;
+        const path = nameCols.map((c) => String(rows[i][c] == null ? '' : rows[i][c]).trim()).filter(Boolean);
+        if (!path.length) continue;
+        tree.push({ c: code, n: path[path.length - 1], p: path, l: path[0] });
+      }
+      if (!tree.length) { P.toast('未解析到有效科目行', 'error'); return; }
+      const built = P.buildSubjectDictFromTree(tree);
+      const sub = draft.dimensions.find((d) => d.key === 'subject');
+      if (sub) { sub.values = built.values; sub.codes = built.codes; sub.aliasesMap = built.aliasesMap; }
+      draft.subjectTree = tree;
+      selectedKey = 'subject';
+      render(currentRoot);
+      P.toast('已解析 ' + tree.length + ' 条科目（' + built.values.length + ' 个一级科目），请核对后保存到协作空间', 'ok');
+    } catch (e) { P.toast('科目主数据导入失败：' + e.message, 'error'); }
+  }
+
+  /* 找出编码列：优先表头含「科目编码/编码/code」，否则取首个「数据区多数为纯数字」的列 */
+  function detectCodeCol(rows) {
+    if (!rows.length) return -1;
+    const head = rows[0].map((x) => String(x == null ? '' : x).trim());
+    const byName = head.findIndex((h) => /编码|code/i.test(h));
+    if (byName >= 0) return byName;
+    const maxCol = Math.max.apply(null, rows.map((r) => r.length));
+    for (let c = 0; c < maxCol; c++) {
+      let total = 0, num = 0;
+      rows.forEach((r) => { const v = String(r[c] == null ? '' : r[c]).trim(); if (v) { total++; if (/^\d+$/.test(v)) num++; } });
+      if (total >= 3 && num / total > 0.7) return c;
+    }
+    return -1;
   }
 })();
