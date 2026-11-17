@@ -1,0 +1,533 @@
+/* ===================================================================
+ * 月度计算引擎测试脚本（纯 Node，无依赖）
+ * 运行：node tools/test-engine.js
+ * 任一条断言失败 → 退出码 1
+ * =================================================================== */
+const path = require('path');
+const R = require(path.join(__dirname, '..', 'js', 'report', 'engine.js'));
+
+let passed = 0;
+const failures = [];
+
+function t(name, fn) {
+  try {
+    fn();
+    passed++;
+    console.log('  ok   ' + name);
+  } catch (e) {
+    failures.push(name);
+    console.error('  FAIL ' + name);
+    console.error('       ' + (e && e.message ? e.message : e));
+  }
+}
+
+function eq(actual, expected, msg) {
+  const a = JSON.stringify(actual);
+  const b = JSON.stringify(expected);
+  if (a !== b) throw new Error((msg || '值不相等') + '\n       实际: ' + a + '\n       期望: ' + b);
+}
+
+function ok(cond, msg) {
+  if (!cond) throw new Error(msg || '断言失败');
+}
+
+/* ---------- 测试夹具 ---------- */
+
+const SUBJ = {
+  sales: { code: '1101', name: '销售收入', parentCode: null, level: 1, path: ['销售收入'], order: 1, unit: 'money' },
+  fee: { code: '66020301', name: '平台费用', parentCode: '660203', level: 3, path: ['销售费用', 'Tiktok市场营销费用', '平台费用'], order: 60, unit: 'money' },
+  commission: { code: '6602030101', name: '平台佣金', parentCode: '66020301', level: 4, path: ['销售费用', 'Tiktok市场营销费用', '平台费用', '平台佣金'], order: 64, unit: 'money' }
+};
+
+const TPL = [SUBJ.sales, SUBJ.fee, SUBJ.commission];
+
+function fact(o) {
+  return Object.assign({ month: '2026-01', data_type: '实际数', amount: 0 }, o || {});
+}
+
+function cell(matrix, code, period, type) {
+  const row = matrix.rows.filter(function (r) { return r.code === code; })[0];
+  if (!row) throw new Error('矩阵中找不到科目 ' + code);
+  const key = period + '|' + (type || '实际数');
+  return row.cells[key];
+}
+
+function diagOf(matrix, code) {
+  return matrix.diagnostics.filter(function (d) { return d.code === code; });
+}
+
+/* ================================================================
+ * 1. 期间解析
+ * ================================================================ */
+console.log('\n[1] normalizePeriod 期间解析');
+
+t('2026-01 → year/month/key/label/sortKey', function () {
+  const p = R.normalizePeriod({ month: '2026-01' });
+  eq(p.key, '2026-01');
+  eq(p.label, '2026-01');
+  eq(p.year, 2026);
+  eq(p.month, 1);
+  eq(p.sortKey, 202601);
+  eq(p.isLegacy, false);
+});
+
+t('2026/1 与 2026年1月 都归一为 2026-01', function () {
+  eq(R.normalizePeriod({ month: '2026/1' }).key, '2026-01');
+  eq(R.normalizePeriod({ month: '2026年1月' }).key, '2026-01');
+});
+
+t('1月 视为无年份，不归入任何年份', function () {
+  const p = R.normalizePeriod({ month: '1月' });
+  eq(p.key, 'LEGACY-M01');
+  eq(p.year, null);
+  eq(p.month, 1);
+  eq(p.isLegacy, true);
+  ok(p.label.indexOf('未标年份') >= 0, 'label 应标注未标年份，实际：' + p.label);
+  eq(p.sortKey, 900001);
+});
+
+t('无年份排序键一定排在真实年份之后', function () {
+  ok(R.normalizePeriod({ month: '1月' }).sortKey > R.normalizePeriod({ month: '2026-12' }).sortKey, '无年份应排在最后');
+});
+
+t('month 只有「1月」时用 period 的年份补齐', function () {
+  const p = R.normalizePeriod({ month: '1月', period: '2026-01' });
+  eq(p.key, '2026-01');
+  eq(p.year, 2026);
+});
+
+t('无法解析 → LEGACY-UNKNOWN', function () {
+  const p = R.normalizePeriod({ month: '不知道' });
+  eq(p.key, 'LEGACY-UNKNOWN');
+  eq(p.label, '期间未知');
+  eq(p.year, null);
+  eq(p.month, null);
+});
+
+/* ================================================================
+ * 2. 筛选条件归一化
+ * ================================================================ */
+console.log('\n[2] normalizeFilters 筛选条件');
+
+t('旧格式字符串 → 单元素数组', function () {
+  const f = R.normalizeFilters({ month: '1月', site: 'ID' });
+  eq(f.version, 2);
+  eq(f.dimensions.month, ['1月']);
+  eq(f.dimensions.site, ['ID']);
+  eq(f.periodMode, 'monthly');
+  eq(f.reportTemplateVersion, 'management-v1');
+  eq(f.source, { mode: 'all', datasetId: null });
+});
+
+t('旧格式空字符串视为「该维度全部」', function () {
+  const f = R.normalizeFilters({ month: '1月', brand: '', category: null });
+  ok(!Object.prototype.hasOwnProperty.call(f.dimensions, 'brand'), 'brand 不应出现');
+  ok(!Object.prototype.hasOwnProperty.call(f.dimensions, 'category'), 'category 不应出现');
+  eq(f.dimensions.month, ['1月']);
+});
+
+t('新格式空数组 [] 必须保留（明确全不选）', function () {
+  const f = R.normalizeFilters({ dimensions: { site: [] } });
+  eq(f.dimensions.site, []);
+});
+
+t('undefined → 空维度、来源全部', function () {
+  const f = R.normalizeFilters(undefined);
+  eq(f.dimensions, {});
+  eq(f.source, { mode: 'all', datasetId: null });
+});
+
+t('month 与 period 同时存在时以 month 为准', function () {
+  const f = R.normalizeFilters({ month: '2026-01', period: '1月' });
+  eq(f.dimensions.month, ['2026-01']);
+});
+
+t('month 为空时回落 period', function () {
+  const f = R.normalizeFilters({ month: '', period: '1月' });
+  eq(f.dimensions.month, ['1月']);
+});
+
+t('dataset 来源被保留', function () {
+  const f = R.normalizeFilters({ source: { mode: 'dataset', datasetId: 12 } });
+  eq(f.source, { mode: 'dataset', datasetId: 12 });
+});
+
+/* ================================================================
+ * 3. 明细筛选
+ * ================================================================ */
+console.log('\n[3] filterFacts 明细筛选');
+
+const rowsForFilter = [
+  fact({ site: 'ID', platform: 'Tiktok', amount: 10 }),
+  fact({ site: 'MY', platform: 'Tiktok', amount: 20 }),
+  fact({ site: 'ID', platform: 'Amazon', amount: 30 }),
+  fact({ site: 'MY', platform: 'Amazon', amount: 40 })
+];
+
+t('同维度 OR、跨维度 AND', function () {
+  const f = R.normalizeFilters({ dimensions: { site: ['ID', 'MY'], platform: ['Tiktok'] } });
+  const res = R.filterFacts(rowsForFilter, f);
+  eq(res.facts.length, 2);
+  eq(res.dropped, 2);
+  const total = res.facts.reduce(function (s, r) { return s + r.amount; }, 0);
+  eq(total, 30);
+});
+
+t('维度不存在 = 不限制', function () {
+  const res = R.filterFacts(rowsForFilter, R.normalizeFilters(undefined));
+  eq(res.facts.length, 4);
+});
+
+t('空数组 = 全不选 = 无匹配（不退回全部）', function () {
+  const res = R.filterFacts(rowsForFilter, R.normalizeFilters({ dimensions: { site: [] } }));
+  eq(res.facts, []);
+  eq(res.dropped, 4);
+});
+
+t('月份筛选同时接受 2026-01 与 LEGACY-M01 写法', function () {
+  const rows = [
+    fact({ month: '2026-01', amount: 1 }),
+    fact({ month: '1月', amount: 2 }),
+    fact({ month: '2025-01', amount: 4 })
+  ];
+  const f = R.normalizeFilters({ dimensions: { month: ['2026-01', 'LEGACY-M01'] } });
+  const res = R.filterFacts(rows, f);
+  eq(res.facts.length, 2);
+});
+
+t('旧写法 month:"1月" 能匹配无年份明细', function () {
+  const res = R.filterFacts([fact({ month: '1月', amount: 5 })], R.normalizeFilters({ month: '1月' }));
+  eq(res.facts.length, 1);
+});
+
+t('subject 维度优先按编码匹配，其次按名称', function () {
+  const rows = [
+    fact({ subject_code: '1101', subject: '销售收入', amount: 1 }),
+    fact({ subject_code: '6602030101', subject: '平台佣金', amount: 2 }),
+    fact({ subject: '平台佣金', amount: 3 })
+  ];
+  const res = R.filterFacts(rows, R.normalizeFilters({ dimensions: { subject: ['平台佣金'] } }));
+  eq(res.facts.length, 2); // 编码行 + 仅名称行
+  const res2 = R.filterFacts(rows, R.normalizeFilters({ dimensions: { subject: ['6602030101'] } }));
+  eq(res2.facts.length, 1);
+});
+
+t('筛选不修改传入数组与行对象', function () {
+  const snapshot = JSON.stringify(rowsForFilter);
+  R.filterFacts(rowsForFilter, R.normalizeFilters({ site: 'ID' }));
+  eq(JSON.stringify(rowsForFilter), snapshot, '传入数据被修改了');
+});
+
+/* ================================================================
+ * 4. 科目解析
+ * ================================================================ */
+console.log('\n[4] resolveSubject 科目解析');
+
+const REG = {
+  byCode: { '6602030101': SUBJ.commission },
+  byName: { '平台佣金': [SUBJ.commission] },
+  list: [SUBJ.commission]
+};
+
+t('编码命中 → match:code', function () {
+  const r = R.resolveSubject({ subject_code: '6602030101' }, REG);
+  eq(r, { code: '6602030101', name: '平台佣金', match: 'code', error: null });
+});
+
+t('编码查不到 → unknown_code，不降级按名称猜', function () {
+  const r = R.resolveSubject({ subject_code: '0000', subject: '平台佣金' }, REG);
+  eq(r, { code: null, name: null, match: null, error: 'unknown_code' });
+});
+
+t('名称唯一命中 → match:name', function () {
+  const r = R.resolveSubject({ subject: '平台佣金' }, REG);
+  eq(r, { code: '6602030101', name: '平台佣金', match: 'name', error: null });
+});
+
+t('同名多条 → ambiguous_name（不任选一个）', function () {
+  const dup = { list: [SUBJ.commission, Object.assign({}, SUBJ.commission, { code: '9002' })] };
+  const r = R.resolveSubject({ subject: '平台佣金' }, dup);
+  eq(r.error, 'ambiguous_name');
+  eq(r.code, null);
+});
+
+t('名称不存在 → unknown_name', function () {
+  eq(R.resolveSubject({ subject: '不存在科目' }, REG).error, 'unknown_name');
+});
+
+/* ================================================================
+ * 5. 月度矩阵
+ * ================================================================ */
+console.log('\n[5] buildMonthlyMatrix 月度矩阵');
+
+t('1月 100+20=120，2月 80，3月无数据补 0', function () {
+  const facts = [
+    fact({ month: '1月', subject_code: '6602030101', amount: 100 }),
+    fact({ month: '1月', subject_code: '6602030101', amount: 20 }),
+    fact({ month: '2月', subject_code: '6602030101', amount: 80 }),
+    fact({ month: '3月', subject_code: '1101', amount: 50 }) // 让 3月列存在
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.columns.length, 3);
+  eq(m.meta.periods, ['LEGACY-M01', 'LEGACY-M02', 'LEGACY-M03']);
+  eq(cell(m, '6602030101', 'LEGACY-M01'), 120);
+  eq(cell(m, '6602030101', 'LEGACY-M02'), 80);
+  eq(cell(m, '6602030101', 'LEGACY-M03'), 0);
+  eq(cell(m, '1101', 'LEGACY-M03'), 50);
+  ok(m.rows.filter(function (r) { return r.code === '6602030101'; })[0].hasData === true, '有数据行 hasData 应为 true');
+});
+
+t('实际数与预算数分列，互不相加', function () {
+  const facts = [
+    fact({ month: '2026-01', data_type: '实际数', subject_code: '6602030101', amount: 100 }),
+    fact({ month: '2026-01', data_type: '预算数', subject_code: '6602030101', amount: 60 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.columns.length, 2);
+  eq(m.columns[0].data_type, '实际数');
+  eq(m.columns[1].data_type, '预算数');
+  eq(m.columns[0].label, '2026-01 实际数');
+  eq(cell(m, '6602030101', '2026-01', '实际数'), 100);
+  eq(cell(m, '6602030101', '2026-01', '预算数'), 60);
+});
+
+t('月份 1、2、10 按时间顺序排列（不能 1,10,2）', function () {
+  const facts = ['2026-01', '2026-02', '2026-10'].map(function (mo) {
+    return fact({ month: mo, subject_code: '6602030101', amount: 1 });
+  });
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.columns.map(function (c) { return c.period; }), ['2026-01', '2026-02', '2026-10']);
+});
+
+t('两个年份的同一月份不混（2025-01 与 2026-01 分列）', function () {
+  const facts = [
+    fact({ month: '2025-01', subject_code: '6602030101', amount: 5 }),
+    fact({ month: '2026-01', subject_code: '6602030101', amount: 7 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.columns.map(function (c) { return c.period; }), ['2025-01', '2026-01']);
+  eq(cell(m, '6602030101', '2025-01'), 5);
+  eq(cell(m, '6602030101', '2026-01'), 7);
+});
+
+t('无年份「1月」不并入任何年份', function () {
+  const facts = [
+    fact({ month: '2025-01', subject_code: '6602030101', amount: 100 }),
+    fact({ month: '1月', subject_code: '6602030101', amount: 20 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.columns.map(function (c) { return c.period; }), ['2025-01', 'LEGACY-M01']);
+  eq(cell(m, '6602030101', '2025-01'), 100);
+  eq(cell(m, '6602030101', 'LEGACY-M01'), 20);
+});
+
+t('同名不同编码的科目不混合', function () {
+  const tpl = [
+    { code: '9001', name: '平台佣金', level: 4, path: ['a', '平台佣金'], order: 1 },
+    { code: '9002', name: '平台佣金', level: 4, path: ['b', '平台佣金'], order: 2 }
+  ];
+  const facts = [
+    fact({ subject_code: '9001', amount: 100 }),
+    fact({ subject_code: '9002', amount: 200 }),
+    fact({ subject: '平台佣金', amount: 999 }) // 无编码、同名 → 歧义，不得任选
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: tpl });
+  eq(m.rows[0].code, '9001');
+  eq(cell(m, '9001', '2026-01'), 100);
+  eq(cell(m, '9002', '2026-01'), 200);
+  eq(diagOf(m, 'ambiguous_name')[0].count, 1);
+  eq(m.meta.usedFactCount, 2);
+});
+
+t('父级与子级同时有数据时不重复计入', function () {
+  const facts = [
+    fact({ subject_code: '66020301', amount: 10 }),   // 父：平台费用
+    fact({ subject_code: '6602030101', amount: 100 }) // 子：平台佣金
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(cell(m, '66020301', '2026-01'), 10);
+  eq(cell(m, '6602030101', '2026-01'), 100);
+});
+
+t('负数保留原符号', function () {
+  const facts = [
+    fact({ subject_code: '6602030101', amount: -50 }),
+    fact({ subject_code: '6602030101', amount: -50 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(cell(m, '6602030101', '2026-01'), -100);
+});
+
+t('缺失组合补 0 且 hasData=false', function () {
+  const facts = [fact({ subject_code: '6602030101', amount: 10 })];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  const salesRow = m.rows.filter(function (r) { return r.code === '1101'; })[0];
+  eq(salesRow.cells['2026-01|实际数'], 0);
+  eq(salesRow.hasData, false);
+});
+
+t('未知编码进 diagnostics 且不计入任何行', function () {
+  const facts = [
+    fact({ subject_code: '6602030101', amount: 100 }),
+    fact({ subject_code: '9999', amount: 500 }),
+    fact({ subject_code: '9999', amount: 500 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(cell(m, '6602030101', '2026-01'), 100);
+  const d = diagOf(m, 'unknown_code');
+  eq(d.length, 1);
+  eq(d[0].count, 2);
+  eq(d[0].level, 'error');
+  eq(m.meta.usedFactCount, 1);
+  const total = m.rows.reduce(function (s, r) {
+    return s + Object.keys(r.cells).reduce(function (x, k) { return x + r.cells[k]; }, 0);
+  }, 0);
+  eq(total, 100, '未知编码的 1000 不应进入矩阵');
+});
+
+t('空数组筛选返回全 0 矩阵，note 说明无匹配', function () {
+  const facts = [fact({ subject_code: '6602030101', amount: 100 })];
+  const f = R.normalizeFilters({ dimensions: { month: [] } });
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL, filters: f });
+  eq(m.columns, []);
+  eq(m.meta.usedFactCount, 0);
+  ok(/无匹配/.test(m.meta.note), 'note 应说明无匹配，实际：' + m.meta.note);
+  m.rows.forEach(function (r) {
+    eq(r.hasData, false);
+    Object.keys(r.cells).forEach(function (k) { eq(r.cells[k], 0); });
+  });
+});
+
+t('金额精度：0.1 + 0.2 = 0.3', function () {
+  const facts = [
+    fact({ subject_code: '6602030101', amount: 0.1 }),
+    fact({ subject_code: '6602030101', amount: 0.2 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(cell(m, '6602030101', '2026-01'), 0.3);
+  ok(cell(m, '6602030101', '2026-01') === 0.3, '应严格等于 0.3，避免浮点误差');
+});
+
+t('选中但没有明细的月份仍保留列并补 0', function () {
+  const facts = [fact({ month: '2026-01', subject_code: '6602030101', amount: 1 })];
+  const f = R.normalizeFilters({ dimensions: { month: ['2026-01', '2026-02', '2026-03'] } });
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL, filters: f });
+  /* 计划书 §C.3：选中哪些月份就生成哪些月份，不能因为没有明细就丢掉列 */
+  eq(m.columns.map(function (c) { return c.period; }), ['2026-01', '2026-02', '2026-03']);
+  eq(cell(m, '6602030101', '2026-02'), 0);
+});
+
+t('选中月份与 facts 交集：筛选外月份不进列', function () {
+  const facts = [
+    fact({ month: '2026-01', subject_code: '6602030101', amount: 1 }),
+    fact({ month: '2026-02', subject_code: '6602030101', amount: 2 })
+  ];
+  const f = R.normalizeFilters({ dimensions: { month: ['2026-02'] } });
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL, filters: f });
+  eq(m.columns.map(function (c) { return c.period; }), ['2026-02']);
+  eq(cell(m, '6602030101', '2026-02'), 2);
+});
+
+t('行顺序严格等于模板顺序', function () {
+  const facts = [fact({ subject_code: '1101', amount: 1 })];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.rows.map(function (r) { return r.code; }), ['1101', '66020301', '6602030101']);
+});
+
+t('不支持的归集规则回退 direct 并进 diagnostics', function () {
+  const facts = [fact({ subject_code: '6602030101', amount: 10 })];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL, rules: { subjectRule: 'profit' } });
+  eq(cell(m, '6602030101', '2026-01'), 10);
+  eq(diagOf(m, 'unsupported_rule')[0].level, 'error');
+});
+
+t('非法金额进 diagnostics 且不计入', function () {
+  const facts = [
+    fact({ subject_code: '6602030101', amount: 10 }),
+    fact({ subject_code: '6602030101', amount: 'abc' })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(cell(m, '6602030101', '2026-01'), 10);
+  eq(diagOf(m, 'invalid_amount')[0].count, 1);
+});
+
+t('矩阵计算不修改 facts 行对象', function () {
+  const facts = [
+    fact({ month: '2025-01', subject_code: '6602030101', amount: -3 }),
+    fact({ month: '1月', subject_code: '6602030101', amount: 4 })
+  ];
+  const snapshot = JSON.stringify(facts);
+  R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(JSON.stringify(facts), snapshot, '矩阵计算修改了传入数据');
+});
+
+t('meta 字段齐全', function () {
+  const facts = [
+    fact({ month: '2026-01', data_type: '实际数', subject_code: '6602030101', amount: 10 }),
+    fact({ month: '2026-02', data_type: '预算数', subject_code: '6602030101', amount: 20 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  eq(m.meta.factCount, 2);
+  eq(m.meta.usedFactCount, 2);
+  eq(m.meta.columnsCount, 4); // 2 个期间 × 2 类数据（笛卡尔列，缺数据补 0）
+  eq(m.meta.subjectCount, 3);
+  eq(cell(m, '6602030101', '2026-01', '预算数'), 0);
+  eq(m.meta.dataTypes, ['实际数', '预算数']);
+  eq(m.meta.periods, ['2026-01', '2026-02']);
+  eq(m.meta.source, { mode: 'all', datasetId: null });
+  eq(m.meta.periodMode, 'monthly');
+  ok(typeof m.meta.note === 'string' && m.meta.note.length > 0, 'note 不能为空');
+});
+
+/* ================================================================
+ * 6. 趋势
+ * ================================================================ */
+console.log('\n[6] buildTrend 趋势');
+
+t('labels 按列顺序，values 缺失补 0', function () {
+  const facts = [
+    fact({ month: '2026-02', subject_code: '6602030101', amount: 20 }),
+    fact({ month: '2026-01', subject_code: '6602030101', amount: 10 }),
+    fact({ month: '2026-02', data_type: '预算数', subject_code: '6602030101', amount: 99 })
+  ];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  const tr = R.buildTrend({ matrix: m, codes: ['6602030101'], data_type: '实际数' });
+  eq(tr.labels, ['2026-01 实际数', '2026-02 实际数']);
+  eq(tr.series.length, 1);
+  eq(tr.series[0].values, [10, 20]);
+  eq(tr.series[0].name, '平台佣金');
+});
+
+t('codes 为空时输出全部科目行', function () {
+  const facts = [fact({ subject_code: '1101', amount: 1 })];
+  const m = R.buildMonthlyMatrix({ facts: facts, template: TPL });
+  const tr = R.buildTrend({ matrix: m, data_type: '实际数' });
+  eq(tr.series.length, 3);
+  eq(tr.series[2].values, [0]);
+});
+
+/* ================================================================
+ * 7. 金额格式化
+ * ================================================================ */
+console.log('\n[7] fmtAmount 金额格式化');
+
+t('千分位两位小数', function () {
+  eq(R.fmtAmount(1234567.891), '1,234,567.89');
+  eq(R.fmtAmount(-1234567.891), '-1,234,567.89');
+  eq(R.fmtAmount(0), '0.00');
+  eq(R.fmtAmount(-0), '0.00');
+  eq(R.fmtAmount(null), '0.00');
+  eq(R.fmtAmount(1234.5), '1,234.50');
+});
+
+/* ================================================================ */
+setTimeout(function () {
+  console.log('\n----------------------------------------');
+  console.log('通过 ' + passed + ' 项，失败 ' + failures.length + ' 项');
+  if (failures.length) {
+    console.log('失败用例：');
+    failures.forEach(function (f) { console.log('  - ' + f); });
+    process.exit(1);
+  }
+  console.log('全部通过');
+}, 0);
