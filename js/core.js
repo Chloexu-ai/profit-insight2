@@ -244,7 +244,9 @@
   }
 
   /* ---------------- data contract helpers ---------------- */
-  const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[\s_\-—()（）\/\\.]/g, '');
+  const norm = (s) => String(s == null ? '' : s).toLowerCase()
+    .replace(/[\uFEFF\u200B\u200C\u200D]/g, '')       /* BOM / 零宽字符 */
+    .replace(/[\s_\-—()（）\/\\.]/g, '');
 
   function P_DICT_FIX() { return window.PA_DICT; }
 
@@ -550,6 +552,22 @@
       });
     }
     return { rows: out.concat(expanded), count: expanded.length, subjects: subjectCols.map((c) => c.subject) };
+  };
+
+  /* 列识别诊断：逐列给出识别结果，便于用户排查「为什么某列没识别」。
+     返回 [{header, field, subject, note}]：field=维度/指标 key，subject=宽表科目列对应的标准科目名 */
+  P.diagnoseHeaders = function (rawRows) {
+    if (!Array.isArray(rawRows) || !rawRows.length) return [];
+    const headers = rawRows[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
+    const wide = P.detectWide(rawRows);
+    const subByIndex = {};
+    if (wide) wide.subjectCols.forEach((c) => { subByIndex[c.index] = c.subject; });
+    return headers.map((h, i) => {
+      const field = P.inferField(h);
+      if (subByIndex[i]) return { header: h, field: 'subject', subject: subByIndex[i], note: '宽表科目列 → ' + subByIndex[i] };
+      if (field) return { header: h, field: field, subject: '', note: '识别为' + (P.measureLabel(field) || field) };
+      return { header: h, field: '', subject: '', note: '未识别（请检查列名）' };
+    });
   };
 
   P.cleanRows = function (rawRows, override) {

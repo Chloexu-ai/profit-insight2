@@ -16,6 +16,7 @@
   let override = null;
   let fileName = '';
   let wideMeta = null;
+  let headerDiag = null;   /* 原始文件逐列识别诊断 */
 
   const TEMPLATE_HEADERS = () => window.PA_TEMPLATE_HEADERS || ['月份','数据类型','站点/国家','平台','渠道','素材来源','品牌','品类','报表产品','科目','金额'];
   const LABEL = () => window.PA_DIM_LABELS || {};
@@ -102,8 +103,19 @@
       const buf = new Uint8Array(await file.arrayBuffer());
       const wb = XLSX.read(buf, { type: 'array', cellDates: true });
       const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+      let rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
       if (rows.length > 5001) { P.toast('源文件超过 5000 行，请先拆分', 'error'); return; }
+      /* 自动定位表头行：有些表格首行是标题/合并单元格/空行，真正的表头在下面几行。
+         取前 6 行中「可识别列数」最多的一行作为表头；至少识别出 2 列才采用。 */
+      let headerRow = 0, best = -1;
+      for (let i = 0; i < Math.min(6, rows.length); i++) {
+        const r = rows[i] || [];
+        const hit = r.filter((h) => P.inferField(h) || P.subjectHeaderName(h)).length;
+        if (hit > best) { best = hit; headerRow = i; }
+      }
+      if (headerRow > 0 && best >= 2) rows = rows.slice(headerRow);
+      /* 逐列识别诊断（基于原始表头），用于排查「某列无法识别」 */
+      headerDiag = P.diagnoseHeaders(rows);
       /* 自动识别「科目横排」宽表：把科目列逆透视回系统内部长表。
          源文件行数按 5000 校验；展开后的内部行数不受此限（仅用于 M2/M3/M4 聚合）。 */
       const wide = P.detectWide(rows);
@@ -133,6 +145,7 @@
     fileName = '管报示例数据.csv';
     override = null;
     wideMeta = null;
+    headerDiag = null;
     cleaned = P.cleanRows(rawRows);
     render(currentRoot);
     P.toast('管报示例数据已载入（科目以编码导入、自动转名称），可直接入库', 'ok');
@@ -224,9 +237,21 @@
       ? '<div class="alert ok">已识别为<b>科目横排宽表</b>：' + wideMeta.subjects.length + ' 个科目列（' + P.h(wideMeta.subjects.slice(0, 6).join('、')) + (wideMeta.subjects.length > 6 ? '…' : '') +
         '） × ' + wideMeta.sourceRows + ' 行 → 自动展开为 ' + wideMeta.expanded + ' 条明细。源表行数已满足上限，展开在内部完成，不影响下游模块。</div>'
       : '';
+    /* 列识别诊断：把原始文件每一列的识别结果列出来，未识别的列高亮提示 */
+    const badDiag = (headerDiag || []).filter((d) => !d.field);
+    const diagHtml = (headerDiag && headerDiag.length)
+      ? '<details style="margin:8px 0"><summary class="tiny-text" style="cursor:pointer;color:var(--text-soft)">列识别诊断（' + headerDiag.length + ' 列' +
+        (badDiag.length ? '，<b style="color:var(--up)">' + badDiag.length + ' 列未识别</b>' : '，全部识别') + '）— 点击展开</summary>' +
+        '<div class="table-wrap" style="margin-top:6px"><table><thead><tr><th>原始列名</th><th>识别为</th><th>说明</th></tr></thead><tbody>' +
+        headerDiag.map((d) => '<tr' + (d.field ? '' : ' style="background:rgba(214,88,88,.08)"') + '><td class="mono">' + P.h(d.header) + '</td><td>' +
+          P.h(d.field || '—') + '</td><td class="muted tiny-text">' + P.h(d.note) + '</td></tr>').join('') +
+        '</tbody></table></div>' +
+        (badDiag.length ? '<p class="tiny-text" style="color:var(--up);margin-top:6px">未识别的列不会导入。请确认列名与管报模板一致，或在下方「字段映射」里手工指定；科目列请用科目编码（如 6001）或「6001(销售收入)」格式。</p>' : '') +
+        '</details>'
+      : '';
     box.innerHTML = '<div class="card-title" style="margin-top:18px"><h3>字段映射与清洗结果</h3><span class="sub">' +
       P.h(fileName) + ' · ' + cleaned.rows.length + ' 行有效数据</span></div>' +
-      wideNotice +
+      wideNotice + diagHtml +
       (cleaned.issues.length ? '<div class="alert info">' + cleaned.issues.map((x) => P.h(x)).join('<br>') + '</div>' : '<div class="alert ok">字段识别完整，未发现明显异常</div>') +
       '<div class="map-grid">' + VIEW_FIELDS.map(([key, label]) => {
         const opts = ['<option value="">— 不导入 —</option>'].concat(headers.map((h, i) =>
@@ -253,7 +278,7 @@
       cleaned = P.cleanRows(rawRows, override);
       renderPreview(root);
     });
-    P.qs('#cancel-import', box).onclick = () => { rawRows = null; cleaned = null; override = null; wideMeta = null; render(root); };
+    P.qs('#cancel-import', box).onclick = () => { rawRows = null; cleaned = null; override = null; wideMeta = null; headerDiag = null; render(root); };
     P.qs('#do-import', box).onclick = async () => {
       if (!cleaned.rows.length) { P.toast('没有可导入的数据', 'error'); return; }
       const btn = P.qs('#do-import', box);
@@ -273,7 +298,7 @@
           source_file: fileName,
           validation_json: { issues: cleaned.issues, summary: s }
         });
-        rawRows = null; cleaned = null; override = null; wideMeta = null;
+        rawRows = null; cleaned = null; override = null; wideMeta = null; headerDiag = null;
         await refreshDatasets();
         P.toast('导入完成，M2/M3/M4 已可读取', 'ok');
       } catch (e) { P.toast('导入失败：' + e.message, 'error'); btn.disabled = false; btn.textContent = '确认入库'; }
