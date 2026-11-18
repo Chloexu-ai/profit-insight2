@@ -536,45 +536,46 @@
     return null;
   };
 
-  /* 检测宽表：存在科目列头，且不存在明确的「科目」字段列 */
+  /* 检测宽表：存在科目列头，且不存在明确的「科目」字段列。
+     每个列头依次尝试：① 字典识别 ② 数字编码兜底（自有科目主数据编码）。
+     两来源统一收集，支持「字典编码 + 自有编码」混合的宽表。 */
   P.detectWide = function (rawRows) {
     if (!Array.isArray(rawRows) || rawRows.length < 2) return null;
     const headers = rawRows[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
     if (headers.some((h) => P.inferField(h) === 'subject')) return null;
+
     const subjectCols = [];
+    const numericFallback = [];
     headers.forEach((h, i) => {
+      /* ① 字典识别（含 编码、编码(名称)、科目标准名） */
       const name = P.subjectHeaderName(h);
-      if (name) subjectCols.push({ index: i, header: h, subject: name });
+      if (name) { subjectCols.push({ index: i, header: h, subject: name }); return; }
+      /* ② 数字编码兜底：自有科目主数据编码（如 6402、9004、6602010112），
+         字典查不到也可用。纯编码或 编码(名称) 都取前置数字；带中文名直接用该名。 */
+      const s = String(h).trim();
+      const m = s.match(/^(\d{4,10})(?:\s*[（(]\s*([^)）]+)[)）])?\s*$/);
+      if (!m) return;
+      const fromDict = P.subjectDisplay(m[1]);
+      const known = fromDict && fromDict !== m[1] ? fromDict : (m[2] ? String(m[2]).trim() : m[1]);
+      numericFallback.push({ index: i, header: h, subject: known });
     });
-    /* 兜底：用户自有科目主数据编码（如 6402、9004）可能尚未同步到当前浏览器字典，
-       字典匹配不到时，把「4-10 位纯数字」列头视为科目编码列。名称先用 subjectDisplay
-       解析，解析不到则保留编码本身（在 M6 导入主数据后会自动显示汉字）。
-       约束：至少 2 个这样的列，且这些列在数据区确实是数值，避免把普通数字列误判。 */
-    if (!subjectCols.length) {
-      const numeric = [];
-      headers.forEach((h, i) => {
-        /* 纯编码 6402，或编码+名称 6402(管理费用)，都取前置数字作为科目编码。
-           字典查得到就用标准名；查不到但列头带中文名则直接用该名；都没有则保留编码。 */
-        const s = String(h).trim();
-        const m = s.match(/^(\d{4,10})(?:\s*[（(]\s*([^)）]+)[)）])?\s*$/);
-        if (m) {
-          const fromDict = P.subjectDisplay(m[1]);
-          const known = fromDict && fromDict !== m[1] ? fromDict : (m[2] ? String(m[2]).trim() : m[1]);
-          numeric.push({ index: i, header: h, subject: known });
+
+    /* 数字兜底列需验证数据区确为数值，避免把普通数字文本列误判成科目列。
+       若已有字典科目列，说明整体就是宽表，兜底列直接采信；否则要求至少 2 列。 */
+    if (numericFallback.length) {
+      const allNumeric = numericFallback.every((c) => {
+        for (let r = 1; r < Math.min(rawRows.length, 5); r++) {
+          const v = rawRows[r] && rawRows[r][c.index];
+          if (v != null && String(v).trim() !== '' && !P.parseNumber(v)) return false;
         }
+        return true;
       });
-      if (numeric.length >= 2) {
-        const allNumeric = numeric.every((c) => {
-          for (let r = 1; r < Math.min(rawRows.length, 5); r++) {
-            const v = rawRows[r] && rawRows[r][c.index];
-            if (v != null && String(v).trim() !== '' && !P.parseNumber(v)) return false;
-          }
-          return true;
-        });
-        if (allNumeric) numeric.forEach((c) => subjectCols.push(c));
+      if (allNumeric && (subjectCols.length > 0 || numericFallback.length >= 2)) {
+        numericFallback.forEach((c) => subjectCols.push(c));
       }
     }
     if (!subjectCols.length) return null;
+    subjectCols.sort((a, b) => a.index - b.index);
     return { headers: headers, subjectCols: subjectCols };
   };
 
@@ -597,6 +598,51 @@
       });
     }
     return { rows: out.concat(expanded), count: expanded.length, subjects: subjectCols.map((c) => c.subject) };
+  };
+
+  /* ---------------- 数据集存储抽象（宽表原样存，读取时展开） ----------------
+     宽表科目横排展开后可达十几万行、几十 MB，直接写进单条记录的 rows_json
+     会超出数据库写入/请求体限制导致导入失败。改为：
+       - 入库只存源宽表（几千行，体积可控）+ 展开元数据 pa_store；
+       - 读取时 datasetRows() 在内存展开成长表，M2/M3/M4/M1 预览统一走它。
+     这样写入小、下游数据模型不变。 */
+  const _wideExpandCache = new WeakMap();
+
+  /* 由「源二维数组 + 展开结果」生成入库 payload。
+     wide 非空时按宽表存储；否则按普通长表存储（保持旧行为）。 */
+  P.prepareDatasetPayload = function (rawRows, wide, expandedRows, base) {
+    const payload = Object.assign({}, base || {});
+    if (wide) {
+      payload.rows_json = rawRows;                       // 存源宽表二维数组
+      payload.pa_store = { kind: 'wide', subjectCols: wide.subjectCols.map((c) => ({ index: c.index, subject: c.subject })) };
+      payload.row_count = expandedRows ? expandedRows.length : 0;  // 逻辑行数（展开后）
+    } else {
+      payload.rows_json = expandedRows;
+      payload.row_count = expandedRows ? expandedRows.length : 0;
+    }
+    return payload;
+  };
+
+  /* 统一读取入口：把数据集还原成「内部长表对象数组」。
+     宽表数据集在内存展开并缓存；长表直接返回。权限过滤仍由调用方 applyDataView 负责。 */
+  P.datasetRows = function (ds) {
+    if (!ds) return [];
+    const store = ds.pa_store;
+    if (!store || store.kind !== 'wide') return Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    if (!Array.isArray(ds.rows_json)) return [];
+    let cached = _wideExpandCache.get(ds);
+    if (cached) return cached;
+    /* 重建 wide 对象：列头来自源表首行，科目列来自存储的 subjectCols */
+    const headers = ds.rows_json[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
+    const wide = { headers: headers, subjectCols: store.subjectCols || [] };
+    let rows = [];
+    try {
+      const ex = P.expandWideRows(ds.rows_json, wide);
+      const cl = P.cleanRows(ex.rows);
+      rows = cl.rows;
+    } catch (e) { rows = []; }
+    _wideExpandCache.set(ds, rows);
+    return rows;
   };
 
   /* 列识别诊断：逐列给出识别结果，便于用户排查「为什么某列没识别」。

@@ -16,7 +16,9 @@
   let override = null;
   let fileName = '';
   let wideMeta = null;
-  let headerDiag = null;   /* 原始文件逐列识别诊断 */
+  let currentWide = null;    /* 当前宽表元数据（含 subjectCols），入库时用于按宽表原样存储 */
+  let sourceWideRows = null; /* 源宽表二维数组（未展开），入库时存它而非展开后的大表 */
+  let headerDiag = null;     /* 原始文件逐列识别诊断 */
 
   const TEMPLATE_HEADERS = () => window.PA_TEMPLATE_HEADERS || ['月份','数据类型','站点/国家','平台','渠道','素材来源','品牌','品类','报表产品','科目','金额'];
   const LABEL = () => window.PA_DIM_LABELS || {};
@@ -123,9 +125,13 @@
          源文件行数按 5000 校验；展开后的内部行数不受此限（仅用于 M2/M3/M4 聚合）。 */
       const wide = P.detectWide(rows);
       wideMeta = null;
+      currentWide = null;
+      sourceWideRows = null;
       if (wide) {
         const ex = P.expandWideRows(rows, wide);
         rawRows = ex.rows;
+        sourceWideRows = rows;     /* 保留源宽表，入库只存它（避免几十 MB 的展开表写入失败） */
+        currentWide = wide;
         wideMeta = { subjects: wide.subjectCols.map((c) => c.subject), expanded: ex.count, sourceRows: rows.length - 1 };
       } else {
         rawRows = rows;
@@ -148,6 +154,8 @@
     fileName = '管报示例数据.csv';
     override = null;
     wideMeta = null;
+    currentWide = null;
+    sourceWideRows = null;
     headerDiag = null;
     cleaned = P.cleanRows(rawRows);
     render(currentRoot);
@@ -281,7 +289,7 @@
       cleaned = P.cleanRows(rawRows, override);
       renderPreview(root);
     });
-    P.qs('#cancel-import', box).onclick = () => { rawRows = null; cleaned = null; override = null; wideMeta = null; headerDiag = null; render(root); };
+    P.qs('#cancel-import', box).onclick = () => { rawRows = null; cleaned = null; override = null; wideMeta = null; currentWide = null; sourceWideRows = null; headerDiag = null; render(root); };
     P.qs('#do-import', box).onclick = async () => {
       if (!cleaned.rows.length) { P.toast('没有可导入的数据', 'error'); return; }
       const btn = P.qs('#do-import', box);
@@ -289,19 +297,20 @@
       try {
         const s = P.summary(cleaned.rows);
         const dts = P.dimensionValues(cleaned.rows.filter((r) => r.data_type !== '未分类'), 'data_type').filter(Boolean);
-        await P.dbInsert(P.TABLES.datasets, {
+        const base = {
           workspace_id: P.state.workspace.id,
           owner_name: P.state.user.name || null,
           name: P.qs('#ds-name', box).value.trim() || '未命名数据集',
           kind: P.qs('#ds-kind', box).value,
           period: (dts.length ? dts.join('/') + ' · ' : '') + P.dimensionValues(cleaned.rows, 'month').filter((v) => v !== '未指定月份').sort().join(' ~ '),
           columns_json: cleaned.columns,
-          rows_json: cleaned.rows,
-          row_count: cleaned.rows.length,
           source_file: fileName,
-          validation_json: { issues: cleaned.issues, summary: s }
-        });
-        rawRows = null; cleaned = null; override = null; wideMeta = null; headerDiag = null;
+          validation_json: { issues: cleaned.issues, summary: s, wide: !!(currentWide) }
+        };
+        /* 宽表按源表原样存储（几千行），读取时再展开，避免几十 MB 展开表写入失败 */
+        const payload = P.prepareDatasetPayload(sourceWideRows || rawRows, currentWide, cleaned.rows, base);
+        await P.dbInsert(P.TABLES.datasets, payload);
+        rawRows = null; cleaned = null; override = null; wideMeta = null; currentWide = null; sourceWideRows = null; headerDiag = null;
         await refreshDatasets();
         P.toast('导入完成，M2/M3/M4 已可读取', 'ok');
       } catch (e) { P.toast('导入失败：' + e.message, 'error'); btn.disabled = false; btn.textContent = '确认入库'; }
@@ -311,7 +320,7 @@
   function previewSaved(id) {
     const ds = P.state.datasets.find((d) => d.id === id);
     if (!ds) return;
-    const rows = P.applyDataView(Array.isArray(ds.rows_json) ? ds.rows_json : []);
+    const rows = P.applyDataView(P.datasetRows(ds));
     const s = P.summary(rows);
     const hasMgmt = rows.some((r) => r.site || r.platform || r.data_type);
     const cols = hasMgmt
