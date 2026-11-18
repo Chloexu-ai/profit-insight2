@@ -145,17 +145,19 @@
     return state;
   }
 
-  /* 层级勾选归一：非法值丢弃，缺省 = 四级全选；空数组表示用户主动全部取消 */
+  /* 层级勾选归一：始终收敛为「一级到第 N 级」的连续区间。
+     只要显示第 N 级，就必须同时显示它上面的各级，否则同一层级下重名科目
+     （如两个「平台佣金」）无法区分。空数组表示用户把一级也取消了。 */
   function normalizeLevelsInput(raw) {
     if (raw == null) return ALL_LEVELS.slice();
     const arr = Array.isArray(raw) ? raw : [raw];
-    const out = [];
+    let max = 0;
     arr.forEach((v) => {
       const n = Math.round(Number(v));
-      if (n >= 1 && n <= 4 && out.indexOf(n) < 0) out.push(n);
+      if (n >= 1 && n <= 4 && n > max) max = n;
     });
-    out.sort((a, b) => a - b);
-    return out;
+    if (!max) return [];
+    return ALL_LEVELS.filter((l) => l <= max);
   }
 
   function filters() {
@@ -812,6 +814,7 @@
       filters: filters(),
       rules: {
         subjectRule: o.rule || 'direct',
+        subjectKey: 'code',
         levels: o.levels || null
       }
     });
@@ -827,6 +830,7 @@
       filters: filters(),
       rules: {
         subjectRule: 'rollup',
+        subjectKey: 'code',
         data_type: '实际数',
         basisCode: '6001',
         levels: filters().levelFilter

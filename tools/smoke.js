@@ -196,6 +196,18 @@ if (typeof P.cleanRows === 'function') {
   eq(cleaned.rows[1].subject, '平台佣金', '第二行名称取注册表名称');
   eq(P.resolveSubjectPath(['销售费用', '线上货架站内推广费用', '平台费用', '平台佣金']).code, '6602010101', '完整路径可唯一定位（解决重名）');
   eq(P.resolveSubjectPath(['销售费用', 'Tiktok市场营销费用', '平台费用', '平台佣金']).code, '6602030101', '同名不同树的两条路径分别定位到不同编码');
+
+  /* 旧 4 位编码已停用：不再按旧名称回退，必须报出来 */
+  const legacyRaw = [
+    ['月份', '数据类型', '站点/国家', '平台', '渠道', '素材来源', '品牌', '品类', '报表产品', '科目编码', '金额'],
+    ['2026-01', '实际数', 'ID', 'Tiktok', 'tt自播', '自制', 'GMEELAN', '底妆', '黑气垫', '1101', '1000']
+  ];
+  const legacy = P.cleanRows(legacyRaw);
+  eq(legacy.rows[0].subject_code, '', '旧编码 1101 不再写入 subject_code');
+  ok((legacy.issues || []).some((m) => String(m).indexOf('旧版科目编码已停用') >= 0), '导入时报「旧版科目编码已停用」');
+  eq(P.resolveSubjectValue('1101').error, 'unknown_code', 'resolveSubjectValue 对旧编码返回 unknown_code');
+  eq(P.resolveSubjectValue('1101').hint, 'legacy_code', '并标记为 legacy_code');
+  eq(P.subjectCodeToName('1101'), null, '字典里不再有旧编码别名');
 } else {
   fail++; console.log('  FAIL js/core.js 未提供 cleanRows');
 }

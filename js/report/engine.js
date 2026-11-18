@@ -566,6 +566,12 @@
     /* 输出层级：rules.levels 为空表示全部层级 */
     const levelFilter = normalizeLevels(rules.levels);
 
+    /* 归集主键：
+     * - 'code'：只认科目编码。没填编码、或只能靠名称匹配的行一律不归集并报警，
+     *   避免「同名四级科目」（如两个「平台佣金」）因为按名称匹配而把金额并到一起。
+     * - 'auto'：编码优先，名称唯一时兜底（仅用于兼容旧数据/测试）。 */
+    const subjectKey = String(rules.subjectKey || 'auto') === 'code' ? 'code' : 'auto';
+
     /* 模板科目注册表：编码优先，名称做兜底匹配 */
     const tplItems = template.filter(function (s) {
       return s && typeof s === 'object' && (str(s.code) !== '' || str(s.name) !== '');
@@ -693,6 +699,14 @@
       }
 
       const internal = itemKey(subj);
+      /* 只认编码口径：靠名称匹配到的不归集，避免同名科目混账 */
+      if (subjectKey === 'code' && subj.match !== 'code') {
+        skippedSubject++;
+        bag.add('error', 'missing_code',
+          '该行没有可用的科目编码，未计入任何科目（示例：「' + str(subj.name || rowSubjectName(row)) +
+          '」）。请在「科目编码」列填写《管报格式.xlsx》里的编码后重新导入。', 1);
+        continue;
+      }
       if (subj.conflict) {
         bag.add('error', 'code_name_conflict',
           '科目编码与名称不一致：编码 ' + rowCode(row) + ' 在新模板中对应「' + subj.name +
@@ -839,7 +853,11 @@
       facts: o.facts,
       template: o.template,
       filters: filters,
-      rules: { subjectRule: rules.subjectRule == null ? 'rollup' : rules.subjectRule, levels: null }
+      rules: {
+        subjectRule: rules.subjectRule == null ? 'rollup' : rules.subjectRule,
+        subjectKey: rules.subjectKey || 'auto',
+        levels: null
+      }
     });
 
     const periods = [];

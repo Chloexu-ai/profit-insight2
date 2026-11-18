@@ -7,9 +7,9 @@
  * 为什么要生成而不是手写：
  * 编码一律照抄文档，一条都不许自己编；211 条手抄必然出错，所以由注册表统一派生。
  *
- * 旧编码迁移规则：老 4 位编码（1101/2101/4201…）如果名称能**唯一**映射到新科目，
- * 就保留为 aliasesMap 的兼容键（老编码 → 新名称）；如果与新编码撞号（4101~4106），
- * 一律以新文档为准，不保留旧义——撞号的清理必须由业务确认，脚本不猜。
+ * 旧编码策略（v0.12.1 起）：**旧编码一律停用**。
+ * 历史遗留的 4 位编码（1101/2101/4201…）不再写入 aliasesMap，导入时会被判为未知编码并报警，
+ * 必须换成《管报格式.xlsx》里的新编码重新导入。这样同名科目绝不会因为旧码而被错并到新科目上。
  *
  * 用法：node tools/gen-subject-dict.js
  */
@@ -62,26 +62,10 @@ const codes = R.list.map((s) => s.code);
 const aliasesMap = {};
 R.list.forEach((s) => { aliasesMap[s.code] = s.name; });
 
-const legacyApplied = [];
-const legacyConflicts = [];
-const legacyAmbiguous = [];
-
-oldPairs.forEach((p) => {
-  if (aliasesMap[p.code] != null) {
-    /* 撞号：同一个编码在新旧系统里含义不同，只能以文档为准 */
-    if (aliasesMap[p.code] !== p.name) {
-      legacyConflicts.push({ code: p.code, oldName: p.name, newName: aliasesMap[p.code] });
-    }
-    return;
-  }
-  const hit = R.byName[p.name];
-  if (hit && hit.length === 1) {
-    aliasesMap[p.code] = hit[0].name;
-    legacyApplied.push({ code: p.code, oldName: p.name, newCode: hit[0].code });
-  } else if (hit && hit.length > 1) {
-    legacyAmbiguous.push({ code: p.code, oldName: p.name, candidates: hit.map((s) => s.code) });
-  }
-});
+/* 旧编码只做统计展示，不再写入字典 */
+const dropped = oldPairs
+  .filter((p) => aliasesMap[p.code] == null)
+  .map((p) => p.code + '（' + p.name + '）');
 
 /* ---------- 4. 生成 subject 维度对象 ---------- */
 const dimObj = "{ key: 'subject', label: '科目', aliases: ['科目', '一级科目', '二级科目', '三级科目', '四级科目', '科目编码', 'subject', '会计科目'],\n" +
@@ -115,12 +99,6 @@ console.log('科目条数：' + R.list.length + '（一级 ' + R.list.filter((s)
   ' / 二级 ' + R.list.filter((s) => s.level === 2).length +
   ' / 三级 ' + R.list.filter((s) => s.level === 3).length +
   ' / 四级 ' + R.list.filter((s) => s.level === 4).length + '）');
-console.log('兼容键合计：' + Object.keys(aliasesMap).length + '（新编码 ' + codes.length + ' + 旧编码 ' + legacyApplied.length + '）');
-console.log('\n旧编码已迁移（' + legacyApplied.length + '）：');
-legacyApplied.forEach((x) => console.log('  ' + x.code + ' → ' + x.newCode + '  ' + x.oldName));
-console.log('\n新旧撞号（' + legacyConflicts.length + '，以文档为准，旧义不保留）：');
-legacyConflicts.forEach((x) => console.log('  ' + x.code + '  旧[' + x.oldName + '] → 新[' + x.newName + ']'));
-if (legacyAmbiguous.length) {
-  console.log('\n旧编码名称歧义无法自动迁移（' + legacyAmbiguous.length + '）：');
-  legacyAmbiguous.forEach((x) => console.log('  ' + x.code + '  ' + x.oldName + ' → 候选 ' + x.candidates.join(',')));
-}
+console.log('字典编码数：' + Object.keys(aliasesMap).length + '（仅新编码）');
+console.log('\n已停用的旧编码（' + dropped.length + '，导入时会报未知编码）：');
+dropped.forEach((x) => console.log('  ' + x));

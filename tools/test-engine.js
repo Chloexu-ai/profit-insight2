@@ -690,6 +690,66 @@ t('编码与名称一致时不报冲突', function () {
   ok(diagOf(m, 'code_name_conflict').length === 0, '一致则无诊断');
 });
 
+/* ================================================================
+ * 11. 只认编码归集（subjectKey='code'）
+ * ================================================================ */
+console.log('\n[11] 只认编码归集');
+
+/* 两个同名四级科目：按名称归集会并成一笔，按编码则必须分开 */
+const DUP = [
+  { code: '6602010101', name: '平台佣金', level: 4, path: ['销售费用', 'A', '平台费用', '平台佣金'], order: 1, unit: 'money' },
+  { code: '6602030101', name: '平台佣金', level: 4, path: ['销售费用', 'B', '平台费用', '平台佣金'], order: 2, unit: 'money' },
+  { code: '6001', name: '销售收入', level: 1, path: ['销售收入'], order: 3, unit: 'money' }
+];
+
+t('同名不同编码：编码口径下各自归集，不合并', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [
+      fact({ subject_code: '6602010101', subject: '平台佣金', amount: 100 }),
+      fact({ subject_code: '6602030101', subject: '平台佣金', amount: 20 })
+    ],
+    template: DUP, rules: { subjectKey: 'code' }
+  });
+  eq(cell(m, '6602010101', '2026-01'), 100);
+  eq(cell(m, '6602030101', '2026-01'), 20);
+});
+
+t('只有名称（唯一）没有编码：不归集，报 missing_code', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject: '销售收入', amount: 50 })],
+    template: DUP, rules: { subjectKey: 'code' }
+  });
+  eq(cell(m, '6001', '2026-01'), 0, '不得按名称归集');
+  ok(diagOf(m, 'missing_code').length === 1, '应报 missing_code');
+});
+
+t('只有名称且重名：报 ambiguous_name，不任选一个', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject: '平台佣金', amount: 50 })],
+    template: DUP, rules: { subjectKey: 'code' }
+  });
+  eq(cell(m, '6602010101', '2026-01'), 0);
+  eq(cell(m, '6602030101', '2026-01'), 0);
+  ok(diagOf(m, 'ambiguous_name').length >= 1, '应报 ambiguous_name');
+});
+
+t('缺失编码不会静默计入总额', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject_code: '6602010101', amount: 10 }), fact({ subject: '平台佣金', amount: 999 })],
+    template: DUP, rules: { subjectKey: 'code' }
+  });
+  const total = m.rows.reduce(function (a, r) { return a + (r.cells['2026-01|实际数'] || 0); }, 0);
+  eq(total, 10, '999 未混入任何行');
+});
+
+t('默认 auto 仍兼容名称唯一匹配（不改变旧行为）', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject_code: '6602010101', amount: 10 })],
+    template: DUP
+  });
+  eq(cell(m, '6602010101', '2026-01'), 10);
+});
+
 /* ================================================================ */
 setTimeout(function () {
   console.log('\n----------------------------------------');

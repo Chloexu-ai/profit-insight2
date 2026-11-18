@@ -513,20 +513,41 @@
     return '<aside class="rpt-rail">' +
       '<div class="rpt-rail-title">显示层级</div>' + items +
       '<div class="rpt-rail-count">' + (rowCount == null ? '' : '共 ' + rowCount + ' 行') + '</div>' +
-      '<div class="rpt-rail-note">只勾一级：显示一级科目及其汇总值。<br/>同时勾二级：一级汇总 + 其下二级明细。</div>' +
+      '<div class="rpt-rail-note">勾选第 N 级会自动同时显示它上面的各级，避免同一层级里重名科目分不清。<br/>只勾一级＝只看一级汇总。</div>' +
       '</aside>';
   }
 
-  /* 绑定层级变化：只上报，不自行计算（计算由调用方走 engine，保证同一套结果） */
+  /* 绑定层级变化：勾低层级时自动带上更高层级（1..N 连续），只上报不自算 */
   function bindRail(el, options) {
     var box = el ? el.querySelector('.rpt-rail') : null;
     if (!box || typeof options.onLevelsChange !== 'function') return null;
-    var onChange = function () {
-      var picked = [];
-      Array.prototype.forEach.call(box.querySelectorAll('input[data-rpt-level]'), function (cb) {
-        if (cb.checked) picked.push(Number(cb.getAttribute('data-rpt-level')));
+
+    var boxes = function () {
+      return Array.prototype.slice.call(box.querySelectorAll('input[data-rpt-level]'));
+    };
+    var applyPrefix = function (max) {
+      /* 立即回填勾选态，避免等整块重绘才有反应 */
+      boxes().forEach(function (cb) {
+        cb.checked = Number(cb.getAttribute('data-rpt-level')) <= max;
       });
-      picked.sort(function (a, b) { return a - b; });
+    };
+
+    var onChange = function (e) {
+      var t = e.target;
+      var picked = [];
+      var lv = t && t.getAttribute ? Number(t.getAttribute('data-rpt-level')) : 0;
+      if (lv >= 1 && lv <= 4) {
+        /* 勾选第 N 级 → 1..N 全选；取消第 N 级 → 收缩到 1..N-1 */
+        var max = t.checked ? lv : lv - 1;
+        for (var i = 1; i <= max; i++) picked.push(i);
+        applyPrefix(max);
+      } else {
+        var top = 0;
+        boxes().forEach(function (cb) {
+          if (cb.checked) top = Math.max(top, Number(cb.getAttribute('data-rpt-level')));
+        });
+        for (var j = 1; j <= top; j++) picked.push(j);
+      }
       options.onLevelsChange(picked);
     };
     box.addEventListener('change', onChange);

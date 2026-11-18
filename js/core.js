@@ -407,15 +407,10 @@
         out.match = 'code';
         return out;
       }
-      /* 旧 43 个简化编码（1101/2101…）：先转旧名称，再查新注册表 */
-      const oldName = P.subjectCodeToName(s);
-      if (oldName) {
-        const byOld = resolveSubjectByName(oldName, true);
-        if (byOld.match) return byOld;
-        byOld.name = oldName;
-        return byOld;
-      }
+      /* 旧编码（1101/2101…）自 v0.12.1 起停用：不再按旧名称回退，
+         否则同名科目会被旧码悄悄并到新科目上。这里直接报未知编码并给出提示。 */
       out.error = 'unknown_code';
+      out.hint = /^\d{4}$/.test(s) ? 'legacy_code' : '';
       return out;
     }
     return resolveSubjectByName(s, false);
@@ -669,26 +664,22 @@
   function cleanSubjectCell(row, val, bucket) {
     const s = val == null ? '' : String(val).trim();
     if (!s) { row.subject = '未分类'; row.subject_code = ''; return; }
-    /* 注册表未加载：完全沿用改造前的旧口径，不产生新提示，避免误报 */
+    /* 注册表未加载：沿用旧口径，不产生新提示，避免误报 */
     if (!P.reportRegistry()) { row.subject = P.normalizeDim('subject', s) || s; row.subject_code = ''; return; }
     const res = P.resolveSubjectValue(s);
     if (res.match) {
       row.subject = res.name;
       row.subject_code = res.code;
-      /* 编码在旧 43 条与新模板中含义不同（4101/4102/4103）：按新模板解释，但必须提示核对 */
-      const oldName = /^\d+$/.test(s) ? P.subjectCodeToName(s) : null;
-      if (oldName && oldName !== res.name) bucket.clash[s] = { newName: res.name, oldName: oldName };
       return;
     }
-    /* 解析失败：保留原值（旧编码转旧名称），绝不任选一个候选，也绝不静默丢弃 */
-    const legacyName = P.subjectCodeToName(s);
-    const fallback = legacyName || P.normalizeDim('subject', s) || s;
-    row.subject = fallback;
+    /* 解析失败：保留原值，绝不任选一个候选，也绝不静默丢弃 */
+    row.subject = res.name || s;
     row.subject_code = '';
     if (res.error === 'ambiguous_name') {
-      bucket.ambiguous[s] = { name: fallback, count: (res.candidates || []).length };
-    } else if (legacyName) {
-      bucket.legacy[s] = legacyName;
+      bucket.ambiguous[s] = { name: row.subject, count: (res.candidates || []).length };
+    } else if (res.hint === 'legacy_code') {
+      /* 旧 4 位编码已停用，必须换新编码重导，否则这一行不会进任何科目 */
+      bucket.legacy[s] = s;
     } else {
       bucket.unknown[s] = s;
     }
@@ -987,8 +978,8 @@
     }
     const legacyKeys = Object.keys(subjectIssues.legacy);
     if (legacyKeys.length) {
-      issues.push('旧版科目编码（' + legacyKeys.slice(0, 5).join('、') + (legacyKeys.length > 5 ? ' 等' : '') +
-        '）已按原名称保留，新模板中无同名科目');
+      issues.push('旧版科目编码已停用（' + legacyKeys.slice(0, 5).join('、') + (legacyKeys.length > 5 ? ' 等 ' + legacyKeys.length + ' 个' : '') +
+        '）：这些行未写入编码，报表里不会归集；请用《管报格式.xlsx》的新编码重新导入');
     }
     const clashKeys = Object.keys(subjectIssues.clash);
     if (clashKeys.length) {

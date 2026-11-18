@@ -106,6 +106,18 @@ ok(count(dom, '<tr') >= 210, '无匹配数据仍渲染 211 行（实际 ' + coun
 ok(dom.indexOf('未生成月份列') > 0, '说明为什么没有月份列');
 ok(dom.indexOf('全部为 0') > 0, '说明模板行全部为 0');
 
+/* ---------------- 8.1 层级联动：勾低级自动带高级（v0.12.1） ---------------- */
+console.log('\n[8.1] 层级联动');
+dom = dump('report-lv3');
+ok(count(dom, '<tr data-code=') === 116, '只勾三级 → 自动带上一二级，共 116 行（实际 ' + count(dom, '<tr data-code=') + '）');
+ok(dom.indexOf('data-rpt-level="1" checked') > 0, '一级被自动勾选');
+ok(dom.indexOf('data-rpt-level="2" checked') > 0, '二级被自动勾选');
+ok(dom.indexOf('data-rpt-level="3" checked') > 0, '三级保持勾选');
+ok(dom.indexOf('data-rpt-level="4" checked') < 0, '四级未被勾选');
+dom = dump('report-uncheck2');
+ok(count(dom, '<tr data-code=') === 21, '取消二级后只剩一级 21 行（实际 ' + count(dom, '<tr data-code=') + '）');
+ok(dom.indexOf('data-rpt-level="2" checked') < 0, '二级已取消');
+
 /* ---------------- 9. 经营分析报表（v0.12） ---------------- */
 console.log('\n[9] 经营分析报表');
 dom = dump('analysis');
