@@ -487,6 +487,23 @@
     if (role === 'budget' && isCost && !found.has('budget_cost')) row.budget_cost += amount;
   }
 
+  /* ---------------- 文本文件编码探测 ----------------
+     中文 Windows 下 Excel 另存的 CSV 默认是 GBK/ANSI 编码，浏览器按 UTF-8 读会把
+     「月份」等表头变成乱码。用 UTF-8 严格模式探测：能无损解码就是 UTF-8，
+     遇到非法字节则回退 GBK，兼容两种编码。返回解码后的字符串供 XLSX 解析。 */
+  P.decodeCsvBytes = function (buf) {
+    const bytes = new Uint8Array(buf);
+    if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+      try { return new TextDecoder('utf-8').decode(bytes.subarray(3)); } catch (e) {}
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (e) {
+      try { return new TextDecoder('gbk').decode(bytes); }
+      catch (e2) { return new TextDecoder('utf-8').decode(bytes); }
+    }
+  };
+
   /* ---------------- 宽表（科目横排）识别与展开 ----------------
    * 长表：科目占一列、每个科目一行（维度 × 科目 交叉，行数膨胀）。
    * 宽表：科目编码作列头、每个维度组合一行（行数不含科目维度，显著变小）。
@@ -529,6 +546,34 @@
       const name = P.subjectHeaderName(h);
       if (name) subjectCols.push({ index: i, header: h, subject: name });
     });
+    /* 兜底：用户自有科目主数据编码（如 6402、9004）可能尚未同步到当前浏览器字典，
+       字典匹配不到时，把「4-10 位纯数字」列头视为科目编码列。名称先用 subjectDisplay
+       解析，解析不到则保留编码本身（在 M6 导入主数据后会自动显示汉字）。
+       约束：至少 2 个这样的列，且这些列在数据区确实是数值，避免把普通数字列误判。 */
+    if (!subjectCols.length) {
+      const numeric = [];
+      headers.forEach((h, i) => {
+        /* 纯编码 6402，或编码+名称 6402(管理费用)，都取前置数字作为科目编码。
+           字典查得到就用标准名；查不到但列头带中文名则直接用该名；都没有则保留编码。 */
+        const s = String(h).trim();
+        const m = s.match(/^(\d{4,10})(?:\s*[（(]\s*([^)）]+)[)）])?\s*$/);
+        if (m) {
+          const fromDict = P.subjectDisplay(m[1]);
+          const known = fromDict && fromDict !== m[1] ? fromDict : (m[2] ? String(m[2]).trim() : m[1]);
+          numeric.push({ index: i, header: h, subject: known });
+        }
+      });
+      if (numeric.length >= 2) {
+        const allNumeric = numeric.every((c) => {
+          for (let r = 1; r < Math.min(rawRows.length, 5); r++) {
+            const v = rawRows[r] && rawRows[r][c.index];
+            if (v != null && String(v).trim() !== '' && !P.parseNumber(v)) return false;
+          }
+          return true;
+        });
+        if (allNumeric) numeric.forEach((c) => subjectCols.push(c));
+      }
+    }
     if (!subjectCols.length) return null;
     return { headers: headers, subjectCols: subjectCols };
   };

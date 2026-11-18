@@ -100,8 +100,11 @@
   async function loadFile(file) {
     if (file.size > 10 * 1024 * 1024) { P.toast('文件超过 10MB，请拆分后再导入', 'error'); return; }
     try {
-      const buf = new Uint8Array(await file.arrayBuffer());
-      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      const buf = await file.arrayBuffer();
+      const isText = /\.(csv|txt)$/i.test(file.name || '');
+      const wb = isText
+        ? XLSX.read(P.decodeCsvBytes(buf), { type: 'string', cellDates: true })
+        : XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: true });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       let rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
       if (rows.length > 5001) { P.toast('源文件超过 5000 行，请先拆分', 'error'); return; }
