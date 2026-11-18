@@ -231,12 +231,12 @@ const REG = {
 
 t('编码命中 → match:code', function () {
   const r = R.resolveSubject({ subject_code: '6602030101' }, REG);
-  eq(r, { code: '6602030101', name: '平台佣金', match: 'code', error: null });
+  eq(r, { code: '6602030101', name: '平台佣金', match: 'code', error: null, conflict: null });
 });
 
 t('编码查不到 → unknown_code，不降级按名称猜', function () {
   const r = R.resolveSubject({ subject_code: '0000', subject: '平台佣金' }, REG);
-  eq(r, { code: null, name: null, match: null, error: 'unknown_code' });
+  eq(r, { code: null, name: null, match: null, error: 'unknown_code', conflict: null });
 });
 
 t('名称唯一命中 → match:name', function () {
@@ -518,6 +518,176 @@ t('千分位两位小数', function () {
   eq(R.fmtAmount(-0), '0.00');
   eq(R.fmtAmount(null), '0.00');
   eq(R.fmtAmount(1234.5), '1,234.50');
+});
+
+/* ================================================================
+ * 8. 父级汇总（rollup）与层级过滤
+ * ================================================================ */
+console.log('\n[8] 父级汇总与层级过滤');
+
+/* 编码前缀自洽的模板：6602 ⊃ 660201 ⊃ 6602010101；6601 下挂 headcount 的人数 */
+const RT = [
+  { code: '6602', name: '销售费用', level: 1, path: ['销售费用'], order: 1, unit: 'money' },
+  { code: '660201', name: '线上推广', level: 2, path: ['销售费用', '线上推广'], order: 2, unit: 'money' },
+  { code: '6602010101', name: '平台佣金', level: 4, path: ['销售费用', '线上推广', '平台费用', '平台佣金'], order: 3, unit: 'money' },
+  { code: '6601', name: '管理费用', level: 1, path: ['管理费用'], order: 4, unit: 'money' },
+  { code: '660101', name: '人数', level: 2, path: ['管理费用', '人数'], order: 5, unit: 'headcount' }
+];
+
+const RF = [
+  fact({ subject_code: '6602', amount: 10 }),
+  fact({ subject_code: '660201', amount: 100 }),
+  fact({ subject_code: '6602010101', amount: 50 }),
+  fact({ subject_code: '6601', amount: 1000 }),
+  fact({ subject_code: '660101', amount: 191 })
+];
+
+t('rollup：父级 = 自身 + 同单位子孙（不重复计入孙级的孙级）', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'rollup' } });
+  eq(cell(m, '660201', '2026-01'), 150, '二级 = 100 + 50');
+  eq(cell(m, '6602', '2026-01'), 160, '一级 = 10 + 100 + 50');
+});
+
+t('rollup：人数(headcount) 不会被加进金额科目', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'rollup' } });
+  eq(cell(m, '6601', '2026-01'), 1000, '管理费用只含自身金额，未含 191 人数');
+  eq(cell(m, '660101', '2026-01'), 191, '人数行仍显示 191');
+});
+
+t('rollup：跨单位排除会给出诊断，不静默', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'rollup' } });
+  ok(diagOf(m, 'mixed_unit_skipped').length === 1, '应有 mixed_unit_skipped 诊断');
+});
+
+t('direct 仍是默认，父级只算自身', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT });
+  eq(cell(m, '6602', '2026-01'), 10, 'direct 下 6602 只等于自身');
+  eq(cell(m, '660201', '2026-01'), 100);
+});
+
+t('levels=[1] 只输出一级科目行', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'rollup', levels: [1] } });
+  eq(m.rows.map(function (r) { return r.code; }), ['6602', '6601']);
+  eq(cell(m, '6602', '2026-01'), 160, '一级仍显示汇总值');
+});
+
+t('levels=[1,2] 输出一级与二级，顺序与模板一致', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'rollup', levels: [1, 2] } });
+  eq(m.rows.map(function (r) { return r.code; }), ['6602', '660201', '6601', '660101']);
+});
+
+t('levels 支持字符串与非法值', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { levels: '3,4,9,x' } });
+  eq(m.rows.map(function (r) { return r.code; }), ['6602010101'], '只保留四级行');
+});
+
+t('levels=[] 视为不限制', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { levels: [] } });
+  eq(m.rows.length, 5);
+});
+
+t('rollup 下负数仍保留符号', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject_code: '660201', amount: -30 }), fact({ subject_code: '6602010101', amount: 10 })],
+    template: RT, rules: { subjectRule: 'rollup', levels: [1] }
+  });
+  eq(cell(m, '6602', '2026-01'), -20);
+});
+
+t('未知规则回退 direct 并报 unsupported_rule', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'gross_margin' } });
+  eq(cell(m, '6602', '2026-01'), 10);
+  ok(diagOf(m, 'unsupported_rule').length === 1);
+});
+
+/* ================================================================
+ * 9. 期间矩阵（经营分析报表）
+ * ================================================================ */
+console.log('\n[9] buildPeriodMatrix 期间矩阵');
+
+const PT = [
+  { code: '6001', name: '销售收入', level: 1, path: ['销售收入'], order: 1, unit: 'money' },
+  { code: '600101', name: '发货GMV', level: 2, path: ['销售收入', '发货GMV'], order: 2, unit: 'money' },
+  { code: '6602', name: '销售费用', level: 1, path: ['销售费用'], order: 3, unit: 'money' },
+  { code: '660201', name: '线上推广', level: 2, path: ['销售费用', '线上推广'], order: 4, unit: 'money' }
+];
+
+const PF = [
+  fact({ month: '2026-03', subject_code: '6001', amount: 1000 }),
+  fact({ month: '2026-03', subject_code: '600101', amount: 600 }),
+  fact({ month: '2026-04', subject_code: '6001', amount: 800 }),
+  fact({ month: '2026-04', subject_code: '660201', amount: 300 }),
+  /* 预算数绝不能被加进同一列 */
+  fact({ month: '2026-03', subject_code: '6001', amount: 9999, data_type: '预算数' })
+];
+
+t('列 = 月份（时间升序），不含数据类型', function () {
+  const m = R.buildPeriodMatrix({ facts: PF, template: PT });
+  eq(m.columns.map(function (c) { return c.key; }), ['2026-03', '2026-04']);
+});
+
+t('每行有 total，等于各月之和', function () {
+  const m = R.buildPeriodMatrix({ facts: PF, template: PT });
+  const row = m.rows.filter(function (r) { return r.code === '6001'; })[0];
+  eq(row.total, 2400, '(1000 + 600) + 800，含下级汇总');
+  eq(row.cells['2026-03'], 1600, '预算数 9999 未混入，且含 600101');
+});
+
+t('父级汇总生效：6001 = 自身 + 600101', function () {
+  const m = R.buildPeriodMatrix({ facts: PF, template: PT });
+  const row = m.rows.filter(function (r) { return r.code === '6001'; })[0];
+  eq(row.cells['2026-03'], 1600, '1000 + 600');
+});
+
+t('basis 取销售收入合计，供占比计算', function () {
+  const m = R.buildPeriodMatrix({ facts: PF, template: PT });
+  eq(m.basis.code, '6001');
+  eq(m.basis.found, true);
+  eq(m.basis.total, 2400, '含 600101');
+});
+
+t('levels 裁行但 basis 仍是全量', function () {
+  const m = R.buildPeriodMatrix({ facts: PF, template: PT, rules: { levels: [2] } });
+  eq(m.rows.map(function (r) { return r.code; }), ['600101', '660201']);
+  eq(m.basis.total, 2400, 'basis 不因裁行而丢');
+});
+
+t('空数组（全不选）→ 全 0 且不报错', function () {
+  const m = R.buildPeriodMatrix({
+    facts: PF, template: PT,
+    filters: { version: 2, source: { mode: 'all', datasetId: null }, dimensions: { site: [] } }
+  });
+  const row = m.rows.filter(function (r) { return r.code === '6001'; })[0];
+  eq(row.total, 0);
+  ok(m.meta.note.indexOf('无匹配数据') >= 0);
+});
+
+/* ================================================================
+ * 10. 编码与名称冲突（旧编码遗留数据）
+ * ================================================================ */
+console.log('\n[10] 编码/名称冲突');
+
+const CT = [
+  { code: '4102', name: '产品毛利', level: 1, path: ['产品毛利'], order: 1, unit: 'money' },
+  { code: '4103', name: '销售毛利-内核法', level: 1, path: ['销售毛利-内核法'], order: 2, unit: 'money' }
+];
+
+t('编码命中但名称指向别的编码 → 进 code_name_conflict，仍按编码归集', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject_code: '4102', subject: '销售毛利-内核法', amount: 10 })],
+    template: CT
+  });
+  eq(cell(m, '4102', '2026-01'), 10, '金额按编码归到 4102');
+  eq(cell(m, '4103', '2026-01'), 0, '未被名称拉到 4103');
+  ok(diagOf(m, 'code_name_conflict').length === 1, '应报 code_name_conflict');
+});
+
+t('编码与名称一致时不报冲突', function () {
+  const m = R.buildMonthlyMatrix({
+    facts: [fact({ subject_code: '4102', subject: '产品毛利', amount: 10 })],
+    template: CT
+  });
+  ok(diagOf(m, 'code_name_conflict').length === 0, '一致则无诊断');
 });
 
 /* ================================================================ */

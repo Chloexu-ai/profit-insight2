@@ -102,9 +102,34 @@ ok(summaryOf(dom, 'site') !== '全不选 · 无匹配', '不再跳出「全不�
 /* ---------------- 7. 无数据仍出全 0 管报 ---------------- */
 console.log('\n[7] 无匹配数据时的管报');
 dom = dump('none-report');
-ok(count(dom, '<tr') >= 200, '无匹配数据仍渲染 201 行（实际 ' + count(dom, '<tr') + ' 行）');
+ok(count(dom, '<tr') >= 210, '无匹配数据仍渲染 211 行（实际 ' + count(dom, '<tr') + ' 行）');
 ok(dom.indexOf('未生成月份列') > 0, '说明为什么没有月份列');
 ok(dom.indexOf('全部为 0') > 0, '说明模板行全部为 0');
+
+/* ---------------- 9. 经营分析报表（v0.12） ---------------- */
+console.log('\n[9] 经营分析报表');
+dom = dump('analysis');
+ok(dom.indexOf('rpt-analysis') > 0, '经营分析表格已渲染');
+ok(count(dom, 'rpt-lv-item') === 4, '左侧层级勾选栏有 4 个选项');
+ok(dom.indexOf('总计') > 0, '总计列存在');
+ok(dom.indexOf('占销售收入') > 0, '占销售收入比列存在');
+ok(dom.indexOf('经营分析报表') > 0, '视图标题正确');
+ok(count(dom, '<tr data-code=') === 211, '默认四级全选 = 211 行（实际 ' + count(dom, '<tr data-code=') + '）');
+/* 销售收入 260 = 120 + 80 + 60，占比 100% */
+const row6001 = (dom.match(/<tr data-code="6001"[\s\S]*?<\/tr>/) || [''])[0];
+ok(row6001.indexOf('260.00') > 0, '销售收入总计 260.00（120+80+60）');
+ok(row6001.indexOf('100.0%') > 0, '销售收入占比 100.0%');
+
+/* ---------------- 10. 管报层级勾选 ---------------- */
+console.log('\n[10] 管报层级勾选与父级汇总');
+dom = dump('report');
+ok(count(dom, '<tr data-code=') === 211, '默认四级全选 = 211 行');
+dom = dump('report-lv1');
+ok(count(dom, '<tr data-code=') === 21, '只勾一级 = 21 行（实际 ' + count(dom, '<tr data-code=') + '）');
+const row6602 = (dom.match(/<tr data-code="6602"[\s\S]*?<\/tr>/) || [''])[0];
+ok(row6602.indexOf('-30.00') > 0, '销售费用显示下级汇总 -30.00（父级汇总生效）');
+dom = dump('report-lv12');
+ok(count(dom, '<tr data-code=') === 60, '勾一级+二级 = 60 行（实际 ' + count(dom, '<tr data-code=') + '）');
 
 console.log('\n----------------------------------------');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

@@ -74,15 +74,15 @@ function eq(a, b, name) { ok(a === b, name, '期望 ' + b + '，实际 ' + a); }
 /* ---------------- 1. 科目注册表 ---------------- */
 console.log('\n[1] 科目模板');
 ok(!!REG, '注册表已加载');
-eq(REG.size, 201, '科目条数 = 201');
-eq(REG.list.filter((s) => s.level === 1).length, 16, '一级科目 16 条');
-eq(REG.list.filter((s) => s.level === 4).length, 93, '四级科目 93 条');
+eq(REG.size, 211, '科目条数 = 211（2026-11-18 版模板）');
+eq(REG.list.filter((s) => s.level === 1).length, 21, '一级科目 21 条');
+eq(REG.list.filter((s) => s.level === 4).length, 95, '四级科目 95 条');
 eq(REG.byCode['6001'].name, '销售收入', '6001 = 销售收入');
 eq(REG.byCode['680103'].level, 2, '680103 按编码判定为二级');
 eq(REG.byCode['680103'].name, '进口成本预缴增值税', '680103 名称取二级文字');
 eq(REG.byCode['680103'].path.length, 3, '680103 保留三级文字在路径中');
 ok(REG.duplicates.indexOf('平台佣金') >= 0, '同名科目「平台佣金」被标记为重复');
-ok(REG.list.every((s, i) => s.order === i + 1), '模板顺序连续（1..201）');
+ok(REG.list.every((s, i) => s.order === i + 1), '模板顺序连续（1..211）');
 
 /* ---------------- 2. 筛选语义 ---------------- */
 console.log('\n[2] 筛选语义');
@@ -117,7 +117,7 @@ const m = R.buildMonthlyMatrix({
   filters: R.normalizeFilters({ dimensions: { month: ['2026-01', '2026-02', '2026-03'], data_type: ['实际数', '预算数'] } }),
   rules: { subjectRule: 'direct' }
 });
-eq(m.rows.length, 201, '管报行数 = 201（模板完整保留）');
+eq(m.rows.length, 211, '管报行数 = 211（模板完整保留）');
 eq(m.columns.length, 6, '3 个月 × 2 个数据类型 = 6 列');
 const colKeys = m.columns.map((c) => c.key);
 eq(colKeys[0], '2026-01|实际数', '同月内数据类型按 实际→预算 固定顺序');
@@ -139,7 +139,7 @@ const empty = R.buildMonthlyMatrix({
   filters: R.normalizeFilters({ dimensions: { month: [] } }),
   rules: { subjectRule: 'direct' }
 });
-eq(empty.rows.length, 201, '空筛选仍输出 201 行');
+eq(empty.rows.length, 211, '空筛选仍输出 211 行');
 ok(empty.rows.every((r) => Object.keys(r.cells).every((k) => r.cells[k] === 0)), '空筛选全部补 0');
 ok(/无匹配/.test(empty.meta.note || ''), '空矩阵 meta 注明无匹配数据');
 
@@ -198,6 +198,21 @@ if (typeof P.cleanRows === 'function') {
   eq(P.resolveSubjectPath(['销售费用', 'Tiktok市场营销费用', '平台费用', '平台佣金']).code, '6602030101', '同名不同树的两条路径分别定位到不同编码');
 } else {
   fail++; console.log('  FAIL js/core.js 未提供 cleanRows');
+}
+
+/* ---------------- 数据视图权限（不得随模板换版而放宽） ---------------- */
+if (P.visibleSubjectCodes) {
+  const savedView = P.state.dataView, savedRole = P.state.role;
+  P.state.dataView = 'business'; P.state.role = 'editor';
+  const codes = P.visibleSubjectCodes() || [];
+  eq(codes.length, 24, '业务端可见编码 24 个（19 个名称，含 6402 成本子树的 5 个同名明细）');
+  ok(codes.indexOf('6602') >= 0, '业务端可见销售费用小计');
+  ok(codes.indexOf('6602010101') < 0, '业务端看不到平台佣金等明细（未放宽）');
+  ok(codes.indexOf('9002') < 0, '业务端看不到净利润');
+  ok(codes.indexOf('660101') < 0, '业务端看不到人数');
+  P.state.dataView = 'management'; P.state.role = 'owner';
+  ok(P.visibleSubjectCodes() === null, '管理层视图全部可见');
+  P.state.dataView = savedView; P.state.role = savedRole;
 }
 
 /* ---------------- 汇总 ---------------- */

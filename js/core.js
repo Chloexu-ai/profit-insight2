@@ -446,10 +446,21 @@
     try { sessionStorage.setItem('pa_data_view', key); } catch (e) {}
     return true;
   };
-  /* 当前视图可见的科目标准名数组；null 表示全部可见 */
+  /* 当前视图可见的科目标准名数组；null 表示全部可见
+   * 两种授权口径：
+   * - range：按科目名称区间截取（依赖 PA_DICT 的值顺序，模板换版后顺序会变，慎用）
+   * - list ：显式名称白名单（模板换版也不会因为顺序变化而放宽范围，推荐） */
   P.visibleSubjects = function () {
     const v = P.currentView();
-    if (!v || v.subjectMode === 'all' || !v.subjectRange) return null;
+    if (!v || v.subjectMode === 'all') return null;
+    if (v.subjectMode === 'list') {
+      const allow = Array.isArray(v.subjectList) ? v.subjectList : [];
+      if (!allow.length) return [];
+      const values = subjectDef().values || [];
+      /* 只保留确实存在于当前模板的名称，避免白名单里残留已删除科目 */
+      return allow.filter(function (n) { return values.indexOf(n) >= 0; });
+    }
+    if (!v.subjectRange) return null;
     const values = subjectDef().values || [];
     const [a, b] = v.subjectRange;
     const i = values.indexOf(a), j = values.indexOf(b);

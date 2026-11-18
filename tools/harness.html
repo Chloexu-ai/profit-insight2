@@ -94,7 +94,25 @@
     function click(sel) { var el = document.querySelector(sel); if (el) { el.click(); return true; } return false; }
     var acted = [];
     if (act === 'tpl') acted.push(click('[data-tpl="overview"]'));
-    if (act === 'chart' || act === 'matrix' || act === 'report') acted.push(click('[data-view="' + act + '"]'));
+    if (act === 'chart' || act === 'matrix' || act === 'report' || act === 'analysis') acted.push(click('[data-view="' + act + '"]'));
+    /* 只勾一级：管报应只剩一级科目行 */
+    if (act === 'report-lv1') {
+      acted.push(click('[data-view="report"]'));
+      var cbs = document.querySelectorAll('.rpt-rail input[data-rpt-level]');
+      acted.push(cbs.length === 4);
+      [2, 3, 4].forEach(function (lv) {
+        var cb = document.querySelector('.rpt-rail input[data-rpt-level="' + lv + '"]');
+        if (cb && cb.checked) cb.click();
+      });
+    }
+    /* 勾一级 + 二级 */
+    if (act === 'report-lv12') {
+      acted.push(click('[data-view="report"]'));
+      [3, 4].forEach(function (lv) {
+        var cb = document.querySelector('.rpt-rail input[data-rpt-level="' + lv + '"]');
+        if (cb && cb.checked) cb.click();
+      });
+    }
     if (act === 'open-site') acted.push(click('[data-ms-trigger="site"]'));
     if (act === 'pick-first') {
       click('[data-ms-trigger="site"]');

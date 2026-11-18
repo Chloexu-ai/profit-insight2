@@ -12,6 +12,8 @@
       charts = [];
       if (trendHandle && trendHandle.destroy) trendHandle.destroy();
       trendHandle = null;
+      if (reportHandle && reportHandle.destroy) reportHandle.destroy();
+      reportHandle = null;
       currentRoot = null;
       document.removeEventListener('click', closeMsOutside);
     }
@@ -23,6 +25,7 @@
   let charts = [];
   let filteredRows = [];
   let trendHandle = null;
+  let reportHandle = null;
   let currentWsId = null;
   /* 交互态（不进入持久化）：搜索词与展开的面板 */
   let ui = { search: {}, open: null, trendCodes: [] };
@@ -40,7 +43,8 @@
   /* v0.11：预算数据颗粒度不足，M3 暂不纳入预算数，也不做预算/实际对比。
      需要恢复时把这里改成 [] 即可，其它逻辑无需改动。 */
   const HIDDEN_DATA_TYPES = ['预算数'];
-  const VIEWS = { chart: '图表', matrix: '科目月度对比', report: '管报' };
+  const VIEWS = { chart: '图表', matrix: '科目月度对比', report: '管报', analysis: '经营分析' };
+  const ALL_LEVELS = [1, 2, 3, 4];
 
   const TEMPLATES = {
     overview: {
@@ -136,7 +140,22 @@
     }
     state.view = s.view || 'chart';
     if (!VIEWS[state.view]) state.view = 'chart';
+    /* 层级勾选：旧看板没有该字段时默认全选四级，保证兼容 */
+    state.levelFilter = normalizeLevelsInput(s.levelFilter);
     return state;
+  }
+
+  /* 层级勾选归一：非法值丢弃，缺省 = 四级全选；空数组表示用户主动全部取消 */
+  function normalizeLevelsInput(raw) {
+    if (raw == null) return ALL_LEVELS.slice();
+    const arr = Array.isArray(raw) ? raw : [raw];
+    const out = [];
+    arr.forEach((v) => {
+      const n = Math.round(Number(v));
+      if (n >= 1 && n <= 4 && out.indexOf(n) < 0) out.push(n);
+    });
+    out.sort((a, b) => a - b);
+    return out;
   }
 
   function filters() {
@@ -782,14 +801,36 @@
     return reg.list.filter((s) => P.canSeeSubjectCode(s.code));
   }
 
-  function buildMatrix() {
+  /* opts: { rule: 'direct'|'rollup', levels: [1..4] }；不传保持旧行为（direct、全部层级） */
+  function buildMatrix(opts) {
     if (!window.PAReport || !window.PAReport.buildMonthlyMatrix) return null;
+    const o = opts || {};
     applyFilters();
     return window.PAReport.buildMonthlyMatrix({
       facts: filteredRows,
       template: visibleTemplate(),
       filters: filters(),
-      rules: { subjectRule: 'direct' }
+      rules: {
+        subjectRule: o.rule || 'direct',
+        levels: o.levels || null
+      }
+    });
+  }
+
+  /* 经营分析报表：按月份列出科目，父级含同单位下级汇总 */
+  function buildAnalysis() {
+    if (!window.PAReport || !window.PAReport.buildPeriodMatrix) return null;
+    applyFilters();
+    return window.PAReport.buildPeriodMatrix({
+      facts: filteredRows,
+      template: visibleTemplate(),
+      filters: filters(),
+      rules: {
+        subjectRule: 'rollup',
+        data_type: '实际数',
+        basisCode: '6001',
+        levels: filters().levelFilter
+      }
     });
   }
 
@@ -797,7 +838,47 @@
     const metaEl = P.qs('#m3-report-meta', currentRoot);
     const bodyEl = P.qs('#m3-report-body', currentRoot);
     if (!metaEl || !bodyEl) return;
-    const matrix = buildMatrix();
+
+    const view = filters().view;
+    const levels = filters().levelFilter;
+
+    bodyEl.innerHTML = '';
+    if (trendHandle && trendHandle.destroy) { trendHandle.destroy(); trendHandle = null; }
+    if (reportHandle && reportHandle.destroy) { reportHandle.destroy(); reportHandle = null; }
+
+    const onLevelsChange = (next) => {
+      filters().levelFilter = normalizeLevelsInput(next);
+      renderReportViews();
+    };
+
+    /* ---- 经营分析报表：期间矩阵（行=科目，列=月份，含总计与占收入比） ---- */
+    if (view === 'analysis') {
+      const pm = buildAnalysis();
+      if (!pm) {
+        metaEl.innerHTML = '';
+        bodyEl.innerHTML = '<div class="empty">报表模块尚未加载（js/report/engine.js 未就绪），请刷新页面后重试。</div>';
+        return;
+      }
+      const diag = (pm.diagnostics || []).concat(lastDiagnostics || []);
+      const meta = Object.assign({}, pm.meta, { dataTypes: [pm.meta.dataType] });
+      if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, meta, diag);
+      else metaEl.innerHTML = '<div class="rpt-meta">共 ' + pm.rows.length + ' 行科目 · ' + pm.columns.length + ' 个月份</div>';
+
+      if (window.PAReportView && window.PAReportView.renderAnalysis) {
+        reportHandle = window.PAReportView.renderAnalysis(bodyEl, pm, {
+          levels,
+          basisLabel: '销售收入',
+          onLevelsChange
+        });
+      } else {
+        bodyEl.innerHTML = '<div class="empty">经营分析展示模块尚未加载（js/report/view.js 未就绪）。</div>';
+      }
+      return;
+    }
+
+    /* ---- 管报：父级汇总 + 层级勾选；科目月度对比：保持导入结果口径 ---- */
+    const isReport = view === 'report';
+    const matrix = buildMatrix(isReport ? { rule: 'rollup', levels } : {});
     if (!matrix) {
       metaEl.innerHTML = '';
       bodyEl.innerHTML = '<div class="empty">报表模块尚未加载（js/report/engine.js 未就绪），请刷新页面后重试。</div>';
@@ -806,10 +887,6 @@
     const diag = (matrix.diagnostics || []).concat(lastDiagnostics || []);
     if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, matrix.meta, diag);
     else metaEl.innerHTML = '<div class="rpt-meta">共 ' + matrix.rows.length + ' 行科目 · ' + matrix.columns.length + ' 列</div>';
-
-    const view = filters().view;
-    bodyEl.innerHTML = '';
-    if (trendHandle && trendHandle.destroy) { trendHandle.destroy(); trendHandle = null; }
 
     if (view === 'matrix') {
       const picker = document.createElement('div');
@@ -829,12 +906,16 @@
           onRowClick: (code) => { if (ui.trendCodes.indexOf(code) < 0) { ui.trendCodes.push(code); renderTrend(matrix, trendBox); } }
         });
       }
+      return;
+    }
+
+    if (window.PAReportView && window.PAReportView.renderReport) {
+      reportHandle = window.PAReportView.renderReport(bodyEl, matrix, {
+        levels,
+        onLevelsChange
+      });
     } else {
-      if (window.PAReportView && window.PAReportView.renderReport) {
-        window.PAReportView.renderReport(bodyEl, matrix, {});
-      } else {
-        bodyEl.innerHTML = '<div class="empty">管报展示模块尚未加载（js/report/view.js 未就绪）。</div>';
-      }
+      bodyEl.innerHTML = '<div class="empty">管报展示模块尚未加载（js/report/view.js 未就绪）。</div>';
     }
   }
 

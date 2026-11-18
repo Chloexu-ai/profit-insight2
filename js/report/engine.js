@@ -412,9 +412,21 @@
     if (code !== '') {
       if (hasOwn(reg.byCode, code)) {
         const hit = reg.byCode[code];
-        return { code: str(hit.code), name: str(hit.name), match: 'code', error: null };
+        /* 编码与名称打架：历史数据的旧编码（如 4102 旧义销售毛利）可能刚好撞上新编码。
+         * 以编码为准（用户明确要求按文档编码），但必须把冲突暴露出来，不能静默归类。 */
+        const claimed = rowSubjectName(row);
+        if (claimed !== '' && claimed !== str(hit.name)) {
+          const byName = reg.byName[claimed];
+          if (byName && byName.length === 1 && str(byName[0].code) !== str(hit.code)) {
+            return {
+              code: str(hit.code), name: str(hit.name), match: 'code', error: null,
+              conflict: { claimed: claimed, claimedCode: str(byName[0].code) }
+            };
+          }
+        }
+        return { code: str(hit.code), name: str(hit.name), match: 'code', error: null, conflict: null };
       }
-      return { code: null, name: null, match: null, error: 'unknown_code' };
+      return { code: null, name: null, match: null, error: 'unknown_code', conflict: null };
     }
 
     const name = rowSubjectName(row);
@@ -443,9 +455,90 @@
     return t === '' ? TYPE_UNKNOWN : t;
   }
 
+  /* 层级入参归一：接受 [1,2] 或 '1,2' 或 1；空/非法返回 null（= 不限制层级）。
+     只认 1~4，且去重排序，避免调用方传脏数据导致行全被过滤掉。 */
+  function normalizeLevels(raw) {
+    if (raw == null) return null;
+    let arr;
+    if (Array.isArray(raw)) arr = raw.slice();
+    else if (typeof raw === 'number') arr = [raw];
+    else arr = String(raw).split(/[,，\s]+/);
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+      const n = Number(arr[i]);
+      if (!isFinite(n)) continue;
+      const lv = Math.round(n);
+      if (lv < 1 || lv > 4) continue;
+      if (out.indexOf(lv) >= 0) continue;
+      out.push(lv);
+    }
+    if (!out.length) return null;
+    out.sort(function (a, b) { return a - b; });
+    return out;
+  }
+
+  /**
+   * 父级汇总：把每个科目的值改成「自身 + 子孙合计」。
+   * 判据是编码前缀（子编码以父编码开头且更长），并强制同单位——
+   * 人数(headcount) 永远不会被加进金额(money)科目。
+   * @returns {{cents:Object, hasData:Object, mixedParents:string[], emptyCodeParents:number}}
+   */
+  function rollupCells(cellCents, rowHasData, tplItems, columns) {
+    const items = [];
+    for (let i = 0; i < tplItems.length; i++) {
+      const s = tplItems[i];
+      const code = str(s.code);
+      items.push({
+        key: itemKey(s),
+        code: code,
+        unit: str(s.unit) || 'money'
+      });
+    }
+    const cents = {};
+    const hasData = {};
+    const mixedParents = [];
+
+    for (let ci = 0; ci < columns.length; ci++) {
+      const colKey = columns[ci].key;
+      for (let i = 0; i < items.length; i++) {
+        const parent = items[i];
+        if (parent.code === '') {
+          /* 无编码的模板行无法做前缀匹配：保持 direct 值，不参与汇总 */
+          const k = parent.key + '|' + colKey;
+          if (hasOwn(cellCents, k)) cents[k] = cellCents[k];
+          continue;
+        }
+        let sum = cellCents[parent.key + '|' + colKey] || 0;
+        let childHasData = false;
+        let mixed = false;
+        for (let j = 0; j < items.length; j++) {
+          const child = items[j];
+          if (child === parent) continue;
+          if (child.code === '') continue;
+          if (child.code.length <= parent.code.length) continue;
+          if (child.code.indexOf(parent.code) !== 0) continue;
+          if (child.unit !== parent.unit) { mixed = true; continue; }
+          const ck = child.key + '|' + colKey;
+          if (hasOwn(cellCents, ck)) {
+            sum += cellCents[ck];
+            if (rowHasData[child.key]) childHasData = true;
+          }
+        }
+        if (mixed && mixedParents.indexOf(parent.code) < 0) mixedParents.push(parent.code);
+        const outKey = parent.key + '|' + colKey;
+        if (sum !== 0) cents[outKey] = sum;
+        if (childHasData || rowHasData[parent.key]) hasData[parent.key] = true;
+      }
+    }
+    return { cents: cents, hasData: hasData, mixedParents: mixedParents };
+  }
+
+
   /**
    * 生成月度矩阵。
    * @param {Object} opts { facts, template, filters, rules }
+   *   rules.subjectRule: 'direct'（默认）| 'rollup'
+   *   rules.levels: [1..4] 只输出这些层级（空 = 全部）
    *   template 为科目数组（已由调用方按数据权限过滤），顺序即输出行顺序。
    */
   R.buildMonthlyMatrix = function (opts) {
@@ -457,13 +550,21 @@
     const rules = (o.rules && typeof o.rules === 'object') ? o.rules : {};
     const bag = diagBag();
 
-    /* 归集规则：当前只支持 direct（按行自身编码汇总），绝不内置毛利/利润公式 */
+    /* 归集规则：
+     * - 'direct'：只按科目自身编码汇总（导入结果口径，默认）
+     * - 'rollup'：父级 = 自身 + 其下所有子孙编码（按编码前缀），但**只在同单位内**相加，
+     *   绝不把「人数」并进「管理费用」这类金额科目，也绝不内置毛利/利润公式。
+     * - 其他值：回退 direct 并报 unsupported_rule */
     const rule = rules.subjectRule == null ? 'direct' : String(rules.subjectRule);
-    const ruleIgnored = rule !== 'direct';
+    const ruleIgnored = rule !== 'direct' && rule !== 'rollup';
+    const useRollup = rule === 'rollup';
     if (ruleIgnored) {
       bag.add('error', 'unsupported_rule',
         '不支持的科目归集规则「' + rule + '」，已回退为 direct（仅按科目自身编码汇总）。', 1);
     }
+
+    /* 输出层级：rules.levels 为空表示全部层级 */
+    const levelFilter = normalizeLevels(rules.levels);
 
     /* 模板科目注册表：编码优先，名称做兜底匹配 */
     const tplItems = template.filter(function (s) {
@@ -592,6 +693,12 @@
       }
 
       const internal = itemKey(subj);
+      if (subj.conflict) {
+        bag.add('error', 'code_name_conflict',
+          '科目编码与名称不一致：编码 ' + rowCode(row) + ' 在新模板中对应「' + subj.name +
+          '」，但该行名称「' + subj.conflict.claimed + '」对应编码 ' + subj.conflict.claimedCode +
+          '。已按编码归集，请核对是否为旧编码遗留数据（示例行见导入明细）。', 1);
+      }
       if (!hasOwn(rowIndex, internal)) {
         /* 理论上不会发生（注册表即模板），留作防御 */
         skippedSubject++;
@@ -613,13 +720,34 @@
       bag.add('warn', 'no_year', '部分明细的月份没有年份（如「1月」），已单列为「未标年份」期间，未并入任何年份。', legacyPeriod);
     }
 
+    /* 父级汇总（可选）：把每个科目替换为「自身 + 同单位子孙合计」 */
+    let outCents = cellCents;
+    let outHasData = rowHasData;
+    if (useRollup) {
+      const rolled = rollupCells(cellCents, rowHasData, tplItems, columns);
+      outCents = rolled.cents;
+      outHasData = rolled.hasData;
+      if (rolled.mixedParents.length) {
+        const names = rolled.mixedParents.slice(0, 5)
+          .map(function (c) { const s = registry.byCode && registry.byCode[c]; return s ? s.name : c; });
+        bag.add('warn', 'mixed_unit_skipped',
+          '以下科目下有不同单位的明细（如「人数」），父级汇总时已排除，不计入合计：' +
+          names.join('、') + (rolled.mixedParents.length > 5 ? ' 等' : '') + '。', rolled.mixedParents.length);
+      }
+    }
+
+    /* 层级过滤：只输出选中层级的行，顺序仍为模板顺序 */
+    const outItems = levelFilter
+      ? tplItems.filter(function (s) { return levelFilter.indexOf(Number(s.level)) >= 0; })
+      : tplItems;
+
     /* 输出行：顺序严格等于 template 顺序 */
-    const rows = tplItems.map(function (s) {
+    const rows = outItems.map(function (s) {
       const key = itemKey(s);
       const cells = {};
       for (let i = 0; i < columns.length; i++) {
         const c = columns[i];
-        const cents = cellCents[key + '|' + c.key] || 0;
+        const cents = outCents[key + '|' + c.key] || 0;
         const v = cents / 100;
         cells[c.key] = v === 0 ? 0 : v;
       }
@@ -632,7 +760,7 @@
         /* 单位随行输出：数量/人数不得与金额同轴或混加 */
         unit: str(s.unit) || 'money',
         cells: cells,
-        hasData: !!rowHasData[key]
+        hasData: !!outHasData[key]
       };
     });
 
@@ -650,6 +778,9 @@
     if (unknownPeriod > 0) notes.push(unknownPeriod + ' 行期间无法解析，未计入任何列。');
     if (skippedSubject > 0) notes.push(skippedSubject + ' 行科目无法归集被跳过，详见 diagnostics。');
     if (ruleIgnored) notes.push('不支持的归集规则已回退为 direct。');
+    if (useRollup) notes.push('口径：父级科目含其下同单位子科目的汇总值（不含「人数」等不同单位明细）。');
+    if (levelFilter) notes.push('已按层级筛选：仅显示 ' + levelFilter.map(function (l) { return ['一', '二', '三', '四'][l - 1] + '级'; }).join('、') + ' 科目。');
+    if (!rows.length) notes.push('当前层级与数据权限过滤后没有任何科目行。');
 
     return {
       columns: columns,
@@ -664,7 +795,104 @@
         periods: periods.map(function (p) { return p.key; }),
         source: filters.source,
         periodMode: filters.periodMode || 'monthly',
+        subjectRule: useRollup ? 'rollup' : 'direct',
+        levels: levelFilter ? levelFilter.slice() : null,
         note: notes.join(' ')
+      }
+    };
+  };
+
+  /* ---------------- 期间矩阵（经营分析报表用） ---------------- */
+
+  /**
+   * 期间矩阵：行=科目，列=月份（不带数据类型维度），另给每行「总计」。
+   * 内部复用 buildMonthlyMatrix（固定单一数据类型，避免实际/预算相加），
+   * 因此与月度矩阵、管报共用同一套筛选与计算。
+   * @param {Object} opts { facts, template, filters, rules }
+   *   rules.data_type 默认 '实际数'
+   *   rules.basisCode 占比基准科目，默认 '6001'（销售收入）
+   * @returns {{columns, rows, basis, diagnostics, meta}}
+   */
+  R.buildPeriodMatrix = function (opts) {
+    const o = opts || {};
+    const rules = (o.rules && typeof o.rules === 'object') ? o.rules : {};
+    const type = str(rules.data_type) === '' ? '实际数' : str(rules.data_type);
+    const basisCode = str(rules.basisCode) === '' ? '6001' : str(rules.basisCode);
+    const base = (o.filters && typeof o.filters === 'object' && o.filters.dimensions)
+      ? o.filters : R.normalizeFilters(o.filters);
+
+    /* 深拷贝后固定数据类型：绝不让实际数与预算数进同一列 */
+    const filters = {
+      version: base.version,
+      source: base.source,
+      dimensions: {},
+      periodMode: base.periodMode,
+      reportTemplateVersion: base.reportTemplateVersion
+    };
+    Object.keys(base.dimensions || {}).forEach(function (k) {
+      filters.dimensions[k] = Array.isArray(base.dimensions[k]) ? base.dimensions[k].slice() : base.dimensions[k];
+    });
+    filters.dimensions.data_type = [type];
+
+    /* 先算全部层级，才能取到占比基准；随后再按需裁行 */
+    const full = R.buildMonthlyMatrix({
+      facts: o.facts,
+      template: o.template,
+      filters: filters,
+      rules: { subjectRule: rules.subjectRule == null ? 'rollup' : rules.subjectRule, levels: null }
+    });
+
+    const periods = [];
+    const seen = {};
+    for (let i = 0; i < full.columns.length; i++) {
+      const c = full.columns[i];
+      if (hasOwn(seen, c.period)) continue;
+      seen[c.period] = 1;
+      periods.push({ key: c.period, label: c.periodLabel });
+    }
+
+    const rowsAll = full.rows.map(function (r) {
+      const cells = {};
+      let cents = 0;
+      for (let i = 0; i < periods.length; i++) {
+        const v = r.cells ? (r.cells[periods[i].key + '|' + type] || 0) : 0;
+        cells[periods[i].key] = v;
+        cents += Math.round(v * 100);
+      }
+      return {
+        code: r.code, name: r.name, level: r.level, path: r.path, order: r.order,
+        unit: r.unit, cells: cells, total: cents / 100, hasData: r.hasData
+      };
+    });
+
+    const basisRow = rowsAll.filter(function (r) { return str(r.code) === basisCode; })[0] || null;
+    const levelFilter = normalizeLevels(rules.levels);
+    const rows = levelFilter
+      ? rowsAll.filter(function (r) { return levelFilter.indexOf(Number(r.level)) >= 0; })
+      : rowsAll;
+
+    return {
+      columns: periods,
+      rows: rows,
+      basis: {
+        code: basisCode,
+        name: basisRow ? basisRow.name : '',
+        total: basisRow ? basisRow.total : 0,
+        found: !!basisRow
+      },
+      diagnostics: full.diagnostics,
+      meta: {
+        factCount: full.meta.factCount,
+        usedFactCount: full.meta.usedFactCount,
+        columnsCount: periods.length,
+        subjectCount: rows.length,
+        dataType: type,
+        periods: periods.map(function (p) { return p.key; }),
+        source: full.meta.source,
+        periodMode: full.meta.periodMode,
+        subjectRule: full.meta.subjectRule,
+        levels: levelFilter ? levelFilter.slice() : null,
+        note: full.meta.note
       }
     };
   };

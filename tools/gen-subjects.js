@@ -2,8 +2,11 @@
 /**
  * 从 tools/管报科目模板.csv 生成 js/report/subjects.js
  *
- * 数据来源：《管报格式.xlsx》Sheet1，A:D 为一级~四级科目名称（Excel 合并单元格，
- * 读出来只有左上角有值），E 列为科目编码，共 201 条。
+ * 数据来源：《管报格式.xlsx》Sheet1，A:D 为一级~四级科目名称，E 列为科目编码，共 211 条。
+ * 2026-11-18 版：模板已把合并单元格逐行填满（每行 A~D 都有值），并新增 10 条科目
+ * （产品成本 6402 及其明细、运费服务费、促销服务费、公司计提税负比例、销售毛利/前台毛利、
+ * 营业外收支 9004 及其明细），同时删除 66010x04「后台」与旧 900301~900307。
+ * 编码一律照抄文档，脚本不生成、不修正任何编码。
  *
  * 规则：
  * - 层级由编码长度决定：4/6/8/10 位 → 1/2/3/4 级（不用合并单元格机械推断）。
@@ -22,7 +25,7 @@ const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(__dirname, '管报科目模板.csv');
 const OUT = path.join(ROOT, 'js', 'report', 'subjects.js');
 
-const VERSION = 'management-v1';
+const VERSION = 'management-v2';
 
 /* 简单 CSV 解析：支持双引号包裹与转义双引号 */
 function parseCsv(text) {
@@ -120,7 +123,7 @@ const problems = [];
 subjects.forEach((s) => {
   if (s.level > 1 && !codes.has(s.parentCode)) problems.push('父编码不存在：' + s.code + ' → ' + s.parentCode);
 });
-if (subjects.length !== 201) problems.push('科目条数不是 201，实际 ' + subjects.length);
+if (subjects.length !== 211) problems.push('科目条数不是 211，实际 ' + subjects.length);
 if (problems.length) {
   console.error('校验失败：\n' + problems.join('\n'));
   process.exit(1);
@@ -135,7 +138,7 @@ const tuple = subjects.map((s) => [
 const body = tuple.map((t) => '    ' + JSON.stringify(t).replace(/","/g, '","')).join(',\n');
 
 const out = `/* ===================================================================
- * 管报科目模板 ${VERSION}（201 条）
+ * 管报科目模板 ${VERSION}（211 条）
  * 由 tools/gen-subjects.js 从 tools/管报科目模板.csv 生成，请勿手工编辑。
  * 数据来源：《管报格式.xlsx》Sheet1（A:D 四级科目，E 科目编码）
  *
