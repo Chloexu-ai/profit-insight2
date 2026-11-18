@@ -71,6 +71,8 @@
     /* 加载本空间自定义主数据（若有则覆盖默认字典） */
     await P.loadMasterdata(ws.id);
     P.state.datasets = await P.dbList(P.TABLES.datasets, { eq: { workspace_id: ws.id }, order: 'created_at', ascending: false });
+    /* 压缩宽表需异步解压+展开后，各模块才能同步读取 */
+    if (P.hydrateDatasets) await P.hydrateDatasets(P.state.datasets);
     P.qs('#side-ws-name').textContent = ws.name;
     const roleText = P.state.role === 'owner' ? '空间所有者 · 可管理成员' :
       P.state.role === 'editor' ? '编辑成员 · 可设计模块' : '只读成员 · 可查看数据';

@@ -94,6 +94,8 @@
 
   async function refreshDatasets() {
     P.state.datasets = await P.dbList(P.TABLES.datasets, { eq: { workspace_id: P.state.workspace.id }, order: 'created_at', ascending: false });
+    /* 压缩宽表需异步解压+展开后，M2/M3/M4 才能同步读取 */
+    if (P.hydrateDatasets) await P.hydrateDatasets(P.state.datasets);
     if (window.PAApp) window.PAApp.refreshModuleIndicators();
     if (currentRoot) render(currentRoot);
   }
@@ -307,9 +309,9 @@
           source_file: fileName,
           validation_json: { issues: cleaned.issues, summary: s, wide: !!(currentWide) }
         };
-        /* 宽表按源表原样存储（几千行），读取时再展开，避免几十 MB 展开表写入失败 */
-        const payload = P.prepareDatasetPayload(sourceWideRows || rawRows, currentWide, cleaned.rows, base);
-        await P.dbInsert(P.TABLES.datasets, payload);
+        /* 宽表源 gzip 压缩存储（约 0.6MB），静默写入不回传整行，避免 Failed to fetch */
+        const payload = await P.prepareDatasetPayload(sourceWideRows || rawRows, currentWide, cleaned.rows, base);
+        await P.dbInsertQuiet(P.TABLES.datasets, payload);
         rawRows = null; cleaned = null; override = null; wideMeta = null; currentWide = null; sourceWideRows = null; headerDiag = null;
         await refreshDatasets();
         P.toast('导入完成，M2/M3/M4 已可读取', 'ok');
