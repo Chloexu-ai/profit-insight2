@@ -865,6 +865,17 @@
       filters().showPct = !!next;
       renderReportViews();
     };
+    /* 旧数据集没有科目编码时，core 会按名称唯一匹配临时补码；这里把它说清楚，
+       避免用户以为「数据里本来就有编码」或者以为程序在偷偷按名称归集 */
+    const withBackfillNote = (meta) => {
+      const bf = P.lastBackfill;
+      if (!bf || !bf.filled) return meta;
+      const m = Object.assign({}, meta);
+      m.note = (m.note ? m.note + ' ' : '') +
+        '其中 ' + bf.filled + ' 行旧数据没有科目编码，已按科目名称唯一匹配临时补上（仅内存，未写回数据库；' +
+        '要彻底修正请用带「科目编码」列的表重新导入）。';
+      return m;
+    };
     const showPct = filters().showPct !== false;
 
     /* ---- 经营分析报表：期间矩阵（行=科目，列=月份，含总计与占收入比） ---- */
@@ -877,7 +888,7 @@
       }
       const diag = (pm.diagnostics || []).concat(lastDiagnostics || []);
       const meta = Object.assign({}, pm.meta, { dataTypes: [pm.meta.dataType] });
-      if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, meta, diag);
+      if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, withBackfillNote(meta), diag);
       else metaEl.innerHTML = '<div class="rpt-meta">共 ' + pm.rows.length + ' 行科目 · ' + pm.columns.length + ' 个月份</div>';
 
       if (window.PAReportView && window.PAReportView.renderAnalysis) {
@@ -903,7 +914,7 @@
       return;
     }
     const diag = (matrix.diagnostics || []).concat(lastDiagnostics || []);
-    if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, matrix.meta, diag);
+    if (window.PAReportView && window.PAReportView.renderMeta) window.PAReportView.renderMeta(metaEl, withBackfillNote(matrix.meta), diag);
     else metaEl.innerHTML = '<div class="rpt-meta">共 ' + matrix.rows.length + ' 行科目 · ' + matrix.columns.length + ' 列</div>';
 
     if (view === 'matrix') {

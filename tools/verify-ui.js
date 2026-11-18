@@ -200,6 +200,15 @@ ok(count(dom, 'rpt-th-pct') >= 4, '经营分析每个月份旁也有占比列（
 dom = dump('pct-off-analysis');
 ok(count(dom, 'rpt-th-pct') === 1, '关掉后只剩原有的「占销售收入」合计列（实际 ' + count(dom, 'rpt-th-pct') + '）');
 
+/* ---------------- 12. 旧数据（无编码）补码（v0.13.1） ---------------- */
+console.log('\n[12] 旧数据补编码');
+dom = dump('legacy-nocode-report');
+ok(count(dom, '该行没有可用的科目编码') === 0, '旧数据不再刷「没有可用的科目编码」（实际 ' + count(dom, '该行没有可用的科目编码') + '）');
+ok(dom.indexOf('120.00') > 0, '补码后能正常出数（销售收入 120.00）');
+ok(dom.indexOf('行旧数据没有科目编码') > 0, '顶部说明「已按名称唯一匹配临时补码」');
+ok(dom.indexOf('科目名称对应多个编码') > 0, '重名科目仍然报歧义，不猜');
+ok(count(dom, '<tr data-code=') === 211, '行数仍为 211');
+
 console.log('\n----------------------------------------');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 if (fail) { console.log('存在失败项'); process.exit(1); }

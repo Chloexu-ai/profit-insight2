@@ -86,6 +86,12 @@
     P.state.dataView = 'management';
     P.state.datasets = [{ id: 1, name: '固定样本数据集', rows_json: rows, row_count: rows.length }];
 
+    /* ?act=legacy-nocode*：模拟 v0.12 之前导入的旧数据（只有科目名称、没有科目编码），
+       验证 core 的读取时补码能把它们救回来 */
+    if (/legacy-nocode/.test(location.search)) {
+      rows.forEach(function (r) { delete r.subject_code; });
+    }
+
     window.PAM3.mount(document.getElementById('module-root'));
 
     /* 通过 ?act= 触发一次交互，便于无头浏览器断言 */
@@ -117,6 +123,10 @@
     if (act === 'levels-none') setLevels([], 'report');
     /* 只取消一级，其余保留：验证一级能真正取消 */
     if (act === 'levels-lv1-off') setLevels([2, 3, 4], 'report');
+    /* 旧数据（无编码）→ 管报：应按名称唯一匹配补码后正常出数 */
+    if (act === 'legacy-nocode-report') acted.push(click('[data-view="report"]'));
+    if (act === 'legacy-nocode-analysis') acted.push(click('[data-view="analysis"]'));
+
     /* 占比列：默认开，点一次关掉 */
     if (act === 'pct-off') {
       acted.push(click('[data-view="report"]'));
