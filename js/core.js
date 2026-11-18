@@ -282,7 +282,9 @@
   }
 
   /* ---------------- data contract helpers ---------------- */
-  const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[\s_\-—()（）\/\\.]/g, '');
+  const norm = (s) => String(s == null ? '' : s).toLowerCase()
+    .replace(/[\uFEFF\u200B\u200C\u200D]/g, '')       /* BOM / 零宽字符 */
+    .replace(/[\s_\-—()（）\/\\.]/g, '');
 
   function P_DICT_FIX() { return window.PA_DICT; }
 
