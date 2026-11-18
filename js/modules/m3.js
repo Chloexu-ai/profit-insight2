@@ -37,6 +37,9 @@
     subject: '科目', region: '区域（旧）', product: '产品线（旧）'
   };
   const DATA_TYPE_ORDER = ['实际数', '预算数', '预测数'];
+  /* v0.11：预算数据颗粒度不足，M3 暂不纳入预算数，也不做预算/实际对比。
+     需要恢复时把这里改成 [] 即可，其它逻辑无需改动。 */
+  const HIDDEN_DATA_TYPES = ['预算数'];
   const VIEWS = { chart: '图表', matrix: '科目月度对比', report: '管报' };
 
   const TEMPLATES = {
@@ -165,7 +168,10 @@
       const ds = P.state.datasets.find((d) => d.id === id);
       rows = ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
     }
-    return P.applyDataView(rows);
+    /* 数据视图权限剔除敏感科目；再按版本开关排除暂不参与的数据类型 */
+    const visible = P.applyDataView(rows);
+    if (!HIDDEN_DATA_TYPES.length) return visible;
+    return visible.filter((r) => HIDDEN_DATA_TYPES.indexOf(String((r && r.data_type) || '')) < 0);
   }
 
   function datasetLabel() {
@@ -311,22 +317,90 @@
     return hit ? hit.label : key;
   }
 
+  /* 面板：搜索 + 表头三态复选框 + 选项列表。
+     勾选时【不重建 DOM】，只原地同步状态——旧实现每次勾选整块重绘，
+     label 与 input 在重建过程中被二次触发，导致刚勾一项就跳成「全不选」。 */
   function panelHtml(k, opts) {
-    const selected = picked(k);
-    const isAll = selected === null;
-    const selectedSet = isAll ? opts.map((o) => o.key) : (selected || []);
-    const term = (ui.search[k] || '').trim().toLowerCase();
-    const visible = term ? opts.filter((o) => o.label.toLowerCase().indexOf(term) >= 0) : opts;
+    const list = opts.map((o) => '<label class="ms-opt" data-ms-opt="' + P.h(o.key) + '" data-text="' + P.h(o.label.toLowerCase()) + '">' +
+      '<input type="checkbox" value="' + P.h(o.key) + '" /><span title="' + P.h(o.label) + '">' + P.h(o.label) + '</span></label>').join('');
     return '<div class="ms-search"><input type="text" data-ms-search="' + k + '" placeholder="搜索' + P.h(DIM_LABELS[k] || k) + '…" value="' + P.h(ui.search[k] || '') + '" /></div>' +
-      '<div class="ms-actions"><button type="button" class="btn tiny ghost" data-ms-all="' + k + '">全选' + (term ? '搜索结果' : '') + '</button>' +
-      '<button type="button" class="btn tiny ghost" data-ms-none="' + k + '">全不选</button>' +
-      '<button type="button" class="btn tiny ghost" data-ms-reset="' + k + '">重置</button></div>' +
-      '<div class="ms-options">' +
-      (visible.length ? visible.map((o) => '<label class="ms-opt"><input type="checkbox" value="' + P.h(o.key) + '"' +
-        (selectedSet.indexOf(o.key) >= 0 ? ' checked' : '') + ' /><span title="' + P.h(o.label) + '">' + P.h(o.label) + '</span></label>').join('')
-        : '<div class="ms-empty">没有匹配的取值</div>') +
-      '</div>' +
-      '<div class="ms-foot"><span>' + (isAll ? '当前为「全部」' : selectedSet.length ? '已选 ' + selectedSet.length : '已选 0（无匹配）') + '</span><span>共 ' + opts.length + '</span></div>';
+      '<label class="ms-all"><input type="checkbox" data-ms-checkall="' + k + '" /><span>全选</span>' +
+      '<em class="ms-all-count" data-ms-allcount="' + k + '"></em></label>' +
+      '<div class="ms-options">' + (list || '<div class="ms-empty">没有可选项</div>') + '</div>' +
+      '<div class="ms-foot"><span data-ms-foot="' + k + '"></span><span>共 ' + opts.length + ' 项</span></div>';
+  }
+
+  /* 当前状态下被选中的取值集合：「全部」= 所有取值 */
+  function selectedKeys(k, opts) {
+    const sel = picked(k);
+    if (sel === null) return opts.map((o) => o.key);
+    return sel.slice();
+  }
+
+  function visibleInputs(panel) {
+    return P.qsa('.ms-opt', panel).filter((el) => el.style.display !== 'none')
+      .map((el) => P.qs('input', el)).filter(Boolean);
+  }
+
+  /* 原地同步：触发器摘要 / 计数、面板内勾选态、表头三态复选框、底部统计 */
+  function syncDimUI(k, opts) {
+    const box = P.qs('#m3-filters', currentRoot);
+    if (!box) return;
+    const sel = picked(k);
+    const isAll = sel === null;
+    const isNone = Array.isArray(sel) && sel.length === 0;
+    const n = isAll ? opts.length : sel.length;
+    const summary = isAll ? '全部' : isNone ? '全不选 · 无匹配' : (n === 1 ? labelOf(opts, sel[0]) : '已选 ' + n + ' 项');
+
+    const trigger = P.qs('[data-ms-trigger="' + k + '"]', box);
+    if (trigger) {
+      const span = P.qs('.ms-summary', trigger);
+      if (span) span.textContent = summary;
+      let badge = P.qs('.ms-count', trigger);
+      if (!isAll && !isNone && n > 0) {
+        if (!badge) {
+          badge = document.createElement('span');
+          badge.className = 'ms-count';
+          trigger.appendChild(badge);
+        }
+        badge.textContent = n;
+      } else if (badge) badge.remove();
+    }
+
+    const panel = P.qs('[data-ms-panel="' + k + '"]', box);
+    if (!panel || panel.classList.contains('hidden')) return;
+
+    const keys = selectedKeys(k, opts);
+    P.qsa('.ms-opt', panel).forEach((el) => {
+      const input = P.qs('input', el);
+      if (input) input.checked = keys.indexOf(input.value) >= 0;
+    });
+
+    const vis = visibleInputs(panel);
+    const visChecked = vis.filter((cb) => cb.checked).length;
+    const checkAll = P.qs('[data-ms-checkall]', panel);
+    if (checkAll) {
+      checkAll.checked = vis.length > 0 && visChecked === vis.length;
+      checkAll.indeterminate = visChecked > 0 && visChecked < vis.length;
+      checkAll.disabled = vis.length === 0;
+    }
+    const allCount = P.qs('[data-ms-allcount]', panel);
+    if (allCount) allCount.textContent = vis.length ? visChecked + ' / ' + vis.length : '';
+    const foot = P.qs('[data-ms-foot]', panel);
+    if (foot) foot.textContent = isAll ? '当前为「全部」' : isNone ? '已选 0（无匹配）' : '已选 ' + n + ' 项';
+  }
+
+  /* 从面板 checkbox 读取选中项并写回状态：
+     全部选中 → 删除该维度（= 全部）；一项不选 → 空数组（= 全不选）；否则显式列表 */
+  function commitDim(k, opts) {
+    const panel = P.qs('[data-ms-panel="' + k + '"]', currentRoot);
+    const keys = panel ? P.qsa('.ms-opt input', panel).filter((cb) => cb.checked).map((cb) => cb.value) : [];
+    const f = filters();
+    if (keys.length === 0) f.dimensions[k] = [];
+    else if (keys.length === opts.length) delete f.dimensions[k];
+    else f.dimensions[k] = keys;
+    syncDimUI(k, opts);
+    renderViewBody();
   }
 
   function renderFilters() {
@@ -340,8 +414,7 @@
       const opening = panel.classList.contains('hidden');
       P.qsa('[data-ms-panel]', box).forEach((p) => p.classList.add('hidden'));
       if (opening) {
-        const opts = dimOptions(sourceRows(), k);
-        panel.innerHTML = panelHtml(k, opts);
+        panel.innerHTML = panelHtml(k, dimOptions(sourceRows(), k));
         panel.classList.remove('hidden');
         ui.open = k;
         wirePanel(panel, k);
@@ -352,11 +425,10 @@
     document.removeEventListener('click', closeMsOutside);
     document.addEventListener('click', closeMsOutside);
 
-    /* 重新打开上次的面板（搜索/勾选后保持展开） */
+    /* 重建筛选栏后，上次打开的面板保持展开（搜索词与勾选状态原地同步） */
     if (ui.open) {
       const panel = P.qs('[data-ms-panel="' + ui.open + '"]', box);
-      const btn = P.qs('[data-ms-trigger="' + ui.open + '"]', box);
-      if (panel && btn) {
+      if (panel && P.qs('[data-ms-trigger="' + ui.open + '"]', box)) {
         panel.innerHTML = panelHtml(ui.open, dimOptions(sourceRows(), ui.open));
         panel.classList.remove('hidden');
         wirePanel(panel, ui.open);
@@ -366,54 +438,37 @@
   }
 
   function wirePanel(panel, k) {
+    const opts = dimOptions(sourceRows(), k);
+    /* 面板内部点击不冒泡：否则 document 上的「点外部关闭」会把面板立即关掉 */
+    panel.onclick = (e) => e.stopPropagation();
+
     const search = P.qs('[data-ms-search="' + k + '"]', panel);
     if (search) {
       search.oninput = () => {
         ui.search[k] = search.value;
-        const pos = search.selectionStart;
-        const box = P.qs('[data-ms-panel="' + k + '"]', currentRoot);
-        box.innerHTML = panelHtml(k, dimOptions(sourceRows(), k));
-        wirePanel(box, k);
-        const again = P.qs('[data-ms-search="' + k + '"]', box);
-        if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch (e) {} }
+        const term = search.value.trim().toLowerCase();
+        P.qsa('.ms-opt', panel).forEach((el) => {
+          const text = el.dataset.text || '';
+          el.style.display = !term || text.indexOf(term) >= 0 ? '' : 'none';
+        });
+        syncDimUI(k, opts);
       };
     }
-    P.qsa('input[type=checkbox]', panel).forEach((cb) => cb.onchange = () => {
-      const opts = dimOptions(sourceRows(), k);
-      const term = (ui.search[k] || '').trim().toLowerCase();
-      const visibleKeys = term ? opts.filter((o) => o.label.toLowerCase().indexOf(term) >= 0).map((o) => o.key) : opts.map((o) => o.key);
-      const prev = picked(k);
-      /* 「全部」状态下勾选任意项 = 以全部取值显式作为起点，便于增减 */
-      let base = prev === null ? opts.map((o) => o.key) : prev.slice();
-      visibleKeys.forEach((key) => {
-        const i = base.indexOf(key);
-        if (cb.checked && i < 0) base.push(key);
-        if (!cb.checked && i >= 0) base.splice(i, 1);
-      });
-      setDim(k, base);
-    });
-    const all = P.qs('[data-ms-all="' + k + '"]', panel);
-    if (all) all.onclick = () => {
-      const opts = dimOptions(sourceRows(), k);
-      const term = (ui.search[k] || '').trim().toLowerCase();
-      const visibleKeys = term ? opts.filter((o) => o.label.toLowerCase().indexOf(term) >= 0).map((o) => o.key) : opts.map((o) => o.key);
-      const prev = picked(k);
-      const base = prev === null ? opts.map((o) => o.key) : prev.slice();
-      visibleKeys.forEach((key) => { if (base.indexOf(key) < 0) base.push(key); });
-      setDim(k, base);
-    };
-    const none = P.qs('[data-ms-none="' + k + '"]', panel);
-    if (none) none.onclick = () => setDim(k, []);
-    const reset = P.qs('[data-ms-reset="' + k + '"]', panel);
-    if (reset) reset.onclick = () => setDim(k, null);
-  }
 
-  function setDim(k, value) {
-    const f = filters();
-    if (value === null) delete f.dimensions[k];
-    else f.dimensions[k] = value.slice();
-    renderFilters();
-    renderViewBody();
+    P.qsa('.ms-opt input', panel).forEach((cb) => { cb.onchange = () => commitDim(k, opts); });
+
+    const checkAll = P.qs('[data-ms-checkall]', panel);
+    if (checkAll) checkAll.onchange = () => {
+      const vis = visibleInputs(panel);
+      if (!vis.length) return;
+      const allChecked = vis.every((cb) => cb.checked);
+      vis.forEach((cb) => { cb.checked = !allChecked; });
+      commitDim(k, opts);
+    };
+
+    /* 打开时按已有状态回填勾选，并应用上次的搜索词 */
+    if (search && search.value) search.oninput();
+    else syncDimUI(k, opts);
   }
 
   function closeMsOutside(e) {

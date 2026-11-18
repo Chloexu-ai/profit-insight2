@@ -16,8 +16,14 @@
 .ms-search input { width: 100%; border: 1px solid var(--line); border-radius: 7px;
   padding: 6px 8px; font-size: 13px; outline: none; }
 .ms-search input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
-.ms-actions { display: flex; gap: 6px; margin: 8px 0; }
-.ms-actions .btn { padding: 3px 8px; font-size: 12px; }
+.ms-all { display: flex; align-items: center; gap: 7px; margin: 8px 0;
+  padding: 6px 6px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  cursor: pointer; background: var(--panel-soft); border-bottom: 1px solid var(--line); }
+.ms-all:hover { background: #eef2f8; }
+.ms-all input { margin: 0; }
+.ms-all span { flex: none; }
+.ms-all-count { margin-left: auto; font-style: normal; font-weight: 400;
+  font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
 .ms-options { max-height: 240px; overflow: auto; border-top: 1px solid var(--line); padding-top: 6px; }
 .ms-opt { display: flex; align-items: center; gap: 7px; padding: 5px 4px; border-radius: 6px;
   font-size: 13px; cursor: pointer; }

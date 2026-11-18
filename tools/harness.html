@@ -45,6 +45,13 @@
   <div id="toast-wrap" class="toast-wrap"></div>
   <div id="modal-root" class="modal-root hidden"></div>
 
+  <script>
+    window.__ERRORS__ = [];
+    window.addEventListener('error', function (e) {
+      window.__ERRORS__.push(String(e.message) + ' @' + (e.filename || '').split('/').pop() + ':' + e.lineno);
+      document.title = 'ERR: ' + e.message;
+    });
+  </script>
   <script src="../js/config.js"></script>
   <script src="../js/core.js"></script>
   <script src="../js/report/subjects.js"></script>
@@ -88,18 +95,32 @@
     var acted = [];
     if (act === 'tpl') acted.push(click('[data-tpl="overview"]'));
     if (act === 'chart' || act === 'matrix' || act === 'report') acted.push(click('[data-view="' + act + '"]'));
-    if (act === 'select-all-month') { click('[data-ms-trigger="month"]'); acted.push(click('[data-ms-all="month"]')); }
-    if (act === 'select-none-site') { click('[data-ms-trigger="site"]'); acted.push(click('[data-ms-none="site"]')); }
-    if (act === 'none-report') {
-      click('[data-ms-trigger="site"]'); click('[data-ms-none="site"]');
-      acted.push(click('[data-view="report"]'));
-    }
-    if (act === 'pick-two-site') {
+    if (act === 'open-site') acted.push(click('[data-ms-trigger="site"]'));
+    if (act === 'pick-first') {
       click('[data-ms-trigger="site"]');
-      var cbs = document.querySelectorAll('[data-ms-panel="site"] input[type=checkbox]');
-      if (cbs[0]) { cbs[0].checked = false; cbs[0].onchange(); }
-      if (cbs[1]) { cbs[1].checked = false; cbs[1].onchange(); }
-      acted.push(cbs.length);
+      var box = document.querySelector('[data-ms-panel="site"] .ms-opt input');
+      if (box) box.click();
+      var sum = document.querySelector('[data-ms-trigger="site"] .ms-summary');
+      var checked = document.querySelectorAll('[data-ms-panel="site"] .ms-opt input:checked').length;
+      window.__HARNESS_PICK__ = { clicked: !!box, summary: sum ? sum.textContent : null, checked: checked };
+    }
+    if (act === 'checkall-twice') {
+      click('[data-ms-trigger="month"]');
+      var ca = document.querySelector('[data-ms-panel="month"] [data-ms-checkall]');
+      if (ca) { ca.click(); ca = document.querySelector('[data-ms-panel="month"] [data-ms-checkall]'); if (ca) ca.click(); }
+      var sm = document.querySelector('[data-ms-trigger="month"] .ms-summary');
+      window.__HARNESS_ALL__ = { summary: sm ? sm.textContent : null };
+    }
+    if (act === 'select-none-site') {
+      click('[data-ms-trigger="site"]');
+      var ca2 = document.querySelector('[data-ms-panel="site"] [data-ms-checkall]');
+      acted.push(ca2 ? (ca2.click(), true) : false);
+    }
+    if (act === 'none-report') {
+      click('[data-ms-trigger="site"]');
+      var ca3 = document.querySelector('[data-ms-panel="site"] [data-ms-checkall]');
+      if (ca3) ca3.click();
+      acted.push(click('[data-view="report"]'));
     }
     window.__HARNESS__ = { act: act, acted: acted, ready: true };
   </script>
