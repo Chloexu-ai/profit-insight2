@@ -22,6 +22,26 @@
 
   const TEMPLATE_HEADERS = () => window.PA_TEMPLATE_HEADERS || ['月份','数据类型','站点/国家','平台','渠道','素材来源','品牌','品类','报表产品','科目','金额'];
   const LABEL = () => window.PA_DIM_LABELS || {};
+  const SUBJECT_UNIT_LABEL = { money: '金额', quantity: '数量', headcount: '人数' };
+
+  function csvCell(c) {
+    const s = String(c == null ? '' : c);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function downloadCsv(rows, filename) {
+    const csv = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  /* 科目名称 → 编码：优先 201 条注册表，其次旧 43 条简化编码 */
+  function subjectCodeFor(name) {
+    const res = P.resolveSubjectValue ? P.resolveSubjectValue(name) : null;
+    if (res && res.match) return res.code;
+    return P.subjectNameToCode(name) || '';
+  }
   /* 预览/映射展示的字段：管报维度 + 金额 + 兼容指标 */
   const VIEW_FIELDS = [
     ['month', '月份'], ['data_type', '数据类型'], ['site', '站点/国家'], ['platform', '平台'],
@@ -110,19 +130,8 @@
         ? XLSX.read(P.decodeCsvBytes(buf), { type: 'string', cellDates: true })
         : XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: true });
       const sheet = wb.Sheets[wb.SheetNames[0]];
-      let rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
       if (rows.length > 5001) { P.toast('源文件超过 5000 行，请先拆分', 'error'); return; }
-      /* 自动定位表头行：有些表格首行是标题/合并单元格/空行，真正的表头在下面几行。
-         取前 6 行中「可识别列数」最多的一行作为表头；至少识别出 2 列才采用。 */
-      let headerRow = 0, best = -1;
-      for (let i = 0; i < Math.min(6, rows.length); i++) {
-        const r = rows[i] || [];
-        const hit = r.filter((h) => P.inferField(h) || P.subjectHeaderName(h)).length;
-        if (hit > best) { best = hit; headerRow = i; }
-      }
-      if (headerRow > 0 && best >= 2) rows = rows.slice(headerRow);
-      /* 逐列识别诊断（基于原始表头），用于排查「某列无法识别」 */
-      headerDiag = P.diagnoseHeaders(rows);
       /* 自动识别「科目横排」宽表：把科目列逆透视回系统内部长表。
          源文件行数按 5000 校验；展开后的内部行数不受此限（仅用于 M2/M3/M4 聚合）。 */
       const wide = P.detectWide(rows);
@@ -151,7 +160,7 @@
     const headers = TEMPLATE_HEADERS();
     const map = { '月份':'month','数据类型':'data_type','站点/国家':'site','平台':'platform','渠道':'channel','素材来源':'material','品牌':'brand','品类':'category','报表产品':'report_product','科目':'subject','科目编码':'subject','金额':'amount' };
     rawRows = [headers].concat(window.PA_SAMPLE_ROWS.map((r) => headers.map((h) => h === '科目编码'
-      ? (P.subjectNameToCode(r.subject) || r.subject)
+      ? (subjectCodeFor(r.subject) || r.subject)
       : r[map[h]])));
     fileName = '管报示例数据.csv';
     override = null;
@@ -168,16 +177,11 @@
     const headers = TEMPLATE_HEADERS();
     const rows = [
       headers,
-      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',P.subjectNameToCode('销售收入') || '1101',1280000],
-      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',P.subjectNameToCode('产品成本-内核法') || '2101',842000],
-      ['1月','预算数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',P.subjectNameToCode('销售收入') || '1101',1200000]
+      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',subjectCodeFor('销售收入') || '6001',1280000],
+      ['1月','实际数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',subjectCodeFor('产品成本-内核法') || '6401',842000],
+      ['1月','预算数','ID','Tiktok','tt自播','自制','GMEELAN','底妆','黑气垫',subjectCodeFor('销售收入') || '6001',1200000]
     ];
-    const csv = '\ufeff' + rows.map((r) => r.map((c) => String(c).indexOf(',') >= 0 ? '"' + c + '"' : c).join(',')).join('\r\n');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    a.download = '管报数据导入模板.csv';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    downloadCsv(rows, '管报数据导入模板.csv');
   }
 
   /* 宽表模板：科目编码作列头，一行代表一个维度组合，金额填在各科目列下。
@@ -225,6 +229,23 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
+  /* 科目注册表统计：201 条、层级分布、重名提示 */
+  function subjectStatsHtml() {
+    const reg = P.reportRegistry();
+    if (!reg) return '<div class="alert info">科目注册表（js/report/subjects.js）未加载，暂按旧版 43 条科目编码展示。</div>';
+    const levels = { 1: 0, 2: 0, 3: 0, 4: 0 };
+    (reg.list || []).forEach((s) => { if (levels[s.level] != null) levels[s.level] += 1; });
+    const dups = reg.duplicates || [];
+    const dupSample = dups.slice(0, 6).join('、');
+    return '<div class="alert info"><b>科目模板 ' + P.h(reg.version) + ' · 共 ' + reg.size + ' 条</b>' +
+      '<div class="tiny-text" style="margin-top:6px">层级分布：一级 ' + levels[1] + ' 条 / 二级 ' + levels[2] + ' 条 / 三级 ' + levels[3] + ' 条 / 四级 ' + levels[4] + ' 条</div>' +
+      '<div class="tiny-text" style="margin-top:4px">重名科目 ' + dups.length + ' 组' + (dupSample ? '（如 ' + P.h(dupSample) + ' 等）' : '') +
+      '：<b>同名不同编码，必须按编码区分，不能按名称合并</b>。</div>' +
+      ((reg.anomalies || []).length ? '<div class="tiny-text" style="margin-top:4px">模板结构异常 ' + reg.anomalies.length + ' 行：编码 ' +
+        P.h(reg.anomalies.map((a) => a.code).join('、')) + '（编码层级与文字层级不一致，按编码层级归档）</div>' : '') +
+      '</div>';
+  }
+
   function viewMaster() {
     const dims = window.PA_DICT.dimensions || [];
     const rows = dims.map((d) => {
@@ -235,6 +256,7 @@
     }).join('');
     P.openModal('管报主数据字典（维度与取值）',
       '<p class="tiny-text muted">导入时系统已按此字典自动规范化：编码（如 C10/S33/T02）、别名（如「德国」「速卖通」）与大小写都会转换为标准值；德国编码 DE 统一为 GE。</p>' +
+      subjectStatsHtml() +
       '<div class="table-wrap"><table><thead><tr><th>维度</th><th>字段</th><th>标准取值</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<p class="tiny-text muted" style="margin-top:10px">数据类型：实际数 / 预算数 / 预测数；金额 + 科目 + 数据类型会自动归集出实际收入、成本与预算指标，供 M2/M3/M4 使用。</p>' +
       '<p class="tiny-text muted" style="margin-top:8px"><b>科目请用编码录入</b>（编码来自你的《管报主数据及定义.xlsx》科目主数据，如 6001=销售收入、6401=产品成本-内核法、4102=销售毛利-内核法、9002=净利润-内核法，支持四级明细如 6602010101=平台佣金）：编码比汉字更不易写错，上传后界面自动显示为标准名称。完整对照可点「科目编码表」下载；如主数据有更新，请到 M6「从 Excel 导入科目主数据」重新导入。</p>', 760);
@@ -250,21 +272,9 @@
       ? '<div class="alert ok">已识别为<b>科目横排宽表</b>：' + wideMeta.subjects.length + ' 个科目列（' + P.h(wideMeta.subjects.slice(0, 6).join('、')) + (wideMeta.subjects.length > 6 ? '…' : '') +
         '） × ' + wideMeta.sourceRows + ' 行 → 自动展开为 ' + wideMeta.expanded + ' 条明细。源表行数已满足上限，展开在内部完成，不影响下游模块。</div>'
       : '';
-    /* 列识别诊断：把原始文件每一列的识别结果列出来，未识别的列高亮提示 */
-    const badDiag = (headerDiag || []).filter((d) => !d.field);
-    const diagHtml = (headerDiag && headerDiag.length)
-      ? '<details style="margin:8px 0"><summary class="tiny-text" style="cursor:pointer;color:var(--text-soft)">列识别诊断（' + headerDiag.length + ' 列' +
-        (badDiag.length ? '，<b style="color:var(--up)">' + badDiag.length + ' 列未识别</b>' : '，全部识别') + '）— 点击展开</summary>' +
-        '<div class="table-wrap" style="margin-top:6px"><table><thead><tr><th>原始列名</th><th>识别为</th><th>说明</th></tr></thead><tbody>' +
-        headerDiag.map((d) => '<tr' + (d.field ? '' : ' style="background:rgba(214,88,88,.08)"') + '><td class="mono">' + P.h(d.header) + '</td><td>' +
-          P.h(d.field || '—') + '</td><td class="muted tiny-text">' + P.h(d.note) + '</td></tr>').join('') +
-        '</tbody></table></div>' +
-        (badDiag.length ? '<p class="tiny-text" style="color:var(--up);margin-top:6px">未识别的列不会导入。请确认列名与管报模板一致，或在下方「字段映射」里手工指定；科目列请用科目编码（如 6001）或「6001(销售收入)」格式。</p>' : '') +
-        '</details>'
-      : '';
     box.innerHTML = '<div class="card-title" style="margin-top:18px"><h3>字段映射与清洗结果</h3><span class="sub">' +
       P.h(fileName) + ' · ' + cleaned.rows.length + ' 行有效数据</span></div>' +
-      wideNotice + diagHtml +
+      wideNotice +
       (cleaned.issues.length ? '<div class="alert info">' + cleaned.issues.map((x) => P.h(x)).join('<br>') + '</div>' : '<div class="alert ok">字段识别完整，未发现明显异常</div>') +
       '<div class="map-grid">' + VIEW_FIELDS.map(([key, label]) => {
         const opts = ['<option value="">— 不导入 —</option>'].concat(headers.map((h, i) =>
@@ -279,8 +289,8 @@
       cleaned.rows.slice(0, 8).map((r) => '<tr>' + VIEW_FIELDS.map((f) => {
         let cell = r[f[0]];
         if (f[0] === 'subject' && cell) {
-          const code = P.subjectNameToCode(cell);
-          cell = code ? cell + ' (' + code + ')' : cell;
+          const code = r.subject_code || P.subjectNameToCode(cell);
+          if (code) cell = cell + ' (' + code + ')';
         }
         return '<td>' + P.h(cell) + '</td>';
       }).join('') + '</tr>').join('') +

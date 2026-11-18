@@ -1,0 +1,776 @@
+/* ===================================================================
+ * 管报展示层 PAReportView
+ * 职责：只负责把 engine 产出的矩阵 / 趋势渲染成 DOM，并做数值格式化。
+ * 严禁在此文件中做任何财务计算（毛利、利润、占比、汇总一律由 engine 负责）。
+ *
+ * 依赖：window.PA（P.h / P.fmtMoney / P.fmtCompact / P.qs）
+ *      window.Chart（可选，缺失时趋势图降级为表格）
+ *      window.PA_REPORT_SUBJECTS（可选，用于按编码取单位）
+ * 导出：window.PAReportView
+ * =================================================================== */
+(function () {
+  'use strict';
+
+  var P = window.PA || {};
+
+  /* 图表配色，与 M3 看板保持一致 */
+  var PALETTE = ['#2f6bff', '#0e9f8a', '#f79009', '#7a5af8', '#d92d20', '#12b76a', '#1570ef', '#b54708'];
+
+  var PERIOD_MODE_LABEL = { monthly: '月度', daily: '日', weekly: '周', quarterly: '季度', yearly: '年度' };
+
+  /* ---------------- 基础工具 ---------------- */
+
+  /* 转义：优先复用全局 P.h，缺失时本地兜底 */
+  function h(s) {
+    if (typeof P.h === 'function') return P.h(s);
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function pad2(n) {
+    return n < 10 ? '0' + n : String(n);
+  }
+
+  /* ISO 时间 → 本地时间 YYYY-MM-DD HH:mm */
+  function fmtLocalTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (!d || isNaN(d.getTime())) return String(iso);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+      ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function toNumber(v) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = Number(v);
+    return isFinite(n) ? n : null;
+  }
+
+  /* 千分位格式化；unit 决定小数位：money 两位，quantity/headcount 取整 */
+  function formatCell(n, unit) {
+    var v = toNumber(n);
+    if (v === null) return '—';
+    if (v === 0) return '0';
+    if (unit === 'quantity' || unit === 'headcount') {
+      return Math.round(v).toLocaleString('zh-CN');
+    }
+    return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  /* 数值单元格的 class：0 弱化、负数绿色（中国习惯：负向为绿） */
+  function numClass(v) {
+    if (v === null) return 'num nil';
+    if (v === 0) return 'num zero';
+    if (v < 0) return 'num neg';
+    return 'num';
+  }
+
+  /* 单位解析：优先行内 unit，其次 meta.units，再查科目模板，最后按金额处理 */
+  function unitOf(row, matrix) {
+    if (row && row.unit) return row.unit;
+    var units = matrix && matrix.meta && matrix.meta.units;
+    if (units && row && units[row.code]) return units[row.code];
+    var S = window.PA_REPORT_SUBJECTS;
+    if (S && S.byCode && row && S.byCode[row.code] && S.byCode[row.code].unit) return S.byCode[row.code].unit;
+    return 'money';
+  }
+
+  /* 月份/期间列按 period 分组，保持原顺序（不排序，engine 已给好） */
+  function groupColumns(columns) {
+    var groups = [];
+    var map = {};
+    (columns || []).forEach(function (col) {
+      var key = col.period || col.periodLabel || '';
+      if (!map[key]) {
+        map[key] = { key: key, label: col.periodLabel || col.period || '', cols: [] };
+        groups.push(map[key]);
+      }
+      map[key].cols.push(col);
+    });
+    return groups;
+  }
+
+  /* 表头两行：第一行期间分组（colspan），第二行数据类型；pct=true 时每个数值列后带一个「占比」子列 */
+  function headRows(groups, leadHeadCells, pct) {
+    var r1 = leadHeadCells || '';
+    var r2 = '';
+    groups.forEach(function (g) {
+      r1 += '<th class="rpt-th-period" colspan="' + (g.cols.length * (pct ? 2 : 1)) + '">' + h(g.label) + '</th>';
+      g.cols.forEach(function (c) {
+        r2 += '<th class="rpt-th-type" title="' + h(c.label || '') + '">' + h(c.data_type || '') + '</th>';
+        if (pct) {
+          r2 += '<th class="rpt-th-type rpt-th-pct" title="' +
+            h((c.label || '') + ' 该科目金额 ÷ 同期销售收入') + '">占比</th>';
+        }
+      });
+    });
+    return '<tr>' + r1 + '</tr><tr>' + r2 + '</tr>';
+  }
+
+  /* 占比分母：销售收入行（默认 6001，取矩阵里 rollup 后的合计）。
+     当前视图看不到该行时返回 null —— 所有占比显示「—」并给出提示，
+     绝不拿别的科目顶替当分母，否则算出来的是错误百分比。 */
+  function findBasisRow(matrix) {
+    var rows = (matrix && matrix.rows) || [];
+    var code = (matrix && matrix.basis && matrix.basis.code) || '6001';
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && String(rows[i].code) === String(code)) return rows[i];
+    }
+    return null;
+  }
+
+  /* 占比开关：只上报，重算交给调用方（保证和数值列同一份结果） */
+  function bindPct(el, options) {
+    var box = el ? el.querySelector('[data-rpt-pct]') : null;
+    if (!box || typeof options.onPctChange !== 'function') return null;
+    var onChange = function () { options.onPctChange(!!box.checked); };
+    box.addEventListener('change', onChange);
+    return { box: box, onChange: onChange };
+  }
+
+  /* 数值单元格 */
+  function valueCell(value, unit) {
+    var v = toNumber(value);
+    return '<td class="' + numClass(v) + '">' + h(formatCell(v, unit)) + '</td>';
+  }
+
+  /* 固定列定位校准：按表头实际宽度重算 left，避免长科目名把列宽撑偏后错位。
+     纯几何测量，不涉及任何数值计算；测量失败（隐藏容器）时保留 CSS 默认值。 */
+  /* 固定列左偏移：
+     1) data-lead 序号（管报/经营分析按实际渲染的科目列动态测量，列数可变）；
+     2) 旧的 rpt-sticky-N 类（月度矩阵仍用，列数固定）。 */
+  function syncSticky(table) {
+    if (!table || typeof table.querySelectorAll !== 'function') return;
+    var heads = table.querySelectorAll('thead th');
+    var lefts = [];
+    var leadLefts = [];
+    var offset = 0;
+    Array.prototype.forEach.call(heads, function (th) {
+      var cls = th.className || '';
+      var lead = th.getAttribute ? th.getAttribute('data-lead') : null;
+      var m = /rpt-sticky-(\d)/.exec(cls);
+      if (lead == null && !m) return;
+      var w = th.getBoundingClientRect ? th.getBoundingClientRect().width : (th.offsetWidth || 0);
+      if (lead != null) leadLefts[Number(lead)] = offset;
+      if (m) lefts[Number(m[1]) - 1] = offset;
+      offset += w || 0;
+    });
+    if (!offset) return;
+    var cells = table.querySelectorAll('[data-lead], [class*="rpt-sticky-"]');
+    Array.prototype.forEach.call(cells, function (cell) {
+      var lead = cell.getAttribute ? cell.getAttribute('data-lead') : null;
+      if (lead != null) {
+        if (leadLefts[Number(lead)] != null) cell.style.left = leadLefts[Number(lead)] + 'px';
+        return;
+      }
+      var m = /rpt-sticky-(\d)/.exec(cell.className || '');
+      if (m && lefts[Number(m[1]) - 1] != null) cell.style.left = lefts[Number(m[1]) - 1] + 'px';
+    });
+  }
+
+  /* 向上找 tr（避免依赖 Element.closest 的兼容性问题） */
+  function closestRow(node, root) {
+    var cur = node;
+    while (cur && cur !== root) {
+      if (cur.nodeType === 1 && cur.tagName === 'TR') return cur;
+      cur = cur.parentNode;
+    }
+    return null;
+  }
+
+  function emptyBox(text) {
+    return '<div class="empty">' + h(text || '暂无数据') + '</div>';
+  }
+
+  /* ---------------- 1) 元信息条 + 校验警示 ---------------- */
+
+  function renderMeta(el, meta, diagnostics) {
+    if (!el) return;
+    meta = meta || {};
+    var source = meta.source || {};
+    var periods = meta.periods || [];
+    var dataTypes = meta.dataTypes || [];
+
+    var periodText = '—';
+    if (periods.length === 1) periodText = String(periods[0]);
+    else if (periods.length > 1) periodText = periods[0] + ' ~ ' + periods[periods.length - 1];
+    var modeText = PERIOD_MODE_LABEL[meta.periodMode] ? '（' + PERIOD_MODE_LABEL[meta.periodMode] + '）' : '';
+
+    var html = '<div class="rpt-meta">' +
+      '<span class="rpt-meta-item"><b>数据来源</b>' + h(source.label || '全部数据集（合并）') + '</span>' +
+      '<span class="rpt-meta-item"><b>期间范围</b>' + h(periodText + modeText) + '</span>' +
+      '<span class="rpt-meta-item"><b>数据类型</b>' + h(dataTypes.length ? dataTypes.join(' / ') : '—') + '</span>' +
+      '<span class="rpt-meta-item"><b>生成时间</b>' + h(fmtLocalTime(meta.generatedAt)) + '</span>' +
+      (meta.note ? '<span class="rpt-meta-item rpt-meta-note"><b>口径说明</b>' + h(meta.note) + '</span>' : '') +
+      '<span class="rpt-meta-item rpt-meta-unit"><b>单位说明</b>金额为已统一币种；数量、人数单独计量，不与金额合并汇总</span>' +
+      '</div>';
+
+    /* 校验提示：error 红、warn 橙 */
+    var list = Array.isArray(diagnostics) ? diagnostics : [];
+    var errors = list.filter(function (d) { return d && d.level === 'error'; });
+    var warns = list.filter(function (d) { return d && d.level !== 'error'; });
+
+    if (errors.length) {
+      html += '<div class="rpt-diag rpt-diag-error">' +
+        '<div class="rpt-diag-title">数据校验未通过</div>' +
+        '<ul>' + errors.map(function (d) {
+          return '<li>' + h(d.message || d.code || '未知问题') + ' × ' + (d.count == null ? 1 : d.count) + '</li>';
+        }).join('') + '</ul>' +
+        '<div class="rpt-diag-foot">存在未能归集的数据，正式管报生成前需先修正</div>' +
+        '</div>';
+    }
+    if (warns.length) {
+      html += '<div class="rpt-diag rpt-diag-warn">' +
+        '<div class="rpt-diag-title">数据校验提示</div>' +
+        '<ul>' + warns.map(function (d) {
+          return '<li>' + h(d.message || d.code || '未知问题') + ' × ' + (d.count == null ? 1 : d.count) + '</li>';
+        }).join('') + '</ul>' +
+        '</div>';
+    }
+
+    el.innerHTML = html;
+  }
+
+  /* ---------------- 2) 科目 × 月度矩阵 ---------------- */
+
+  function renderMatrix(el, matrix, options) {
+    options = options || {};
+    if (!el) return { destroy: function () {} };
+    el.innerHTML = '';
+
+    matrix = matrix || {};
+    var rows = Array.isArray(matrix.rows) ? matrix.rows : [];
+    var columns = Array.isArray(matrix.columns) ? matrix.columns : [];
+
+    if (!rows.length) {
+      el.innerHTML = emptyBox('当前筛选条件下没有可展示的科目数据');
+      return { destroy: function () {} };
+    }
+    /* 有模板行但没有月份列（未指定月份且数据中无期间）：仍展示模板行，并说明原因 */
+    var noColsNote = columns.length ? '' :
+      '<div class="rpt-diag rpt-diag-warn">当前筛选条件没有匹配的明细，模板 ' + rows.length +
+      ' 行全部为 0。因未指定月份且数据中没有可识别的期间，未生成月份列。</div>';
+
+    var total = rows.length;
+    var limit = Number(options.maxRows) > 0 ? Number(options.maxRows) : total;
+    var visible = limit < total ? rows.slice(0, limit) : rows;
+
+    /* 工具条：数据量较大时给出总行数提示（不做虚拟滚动） */
+    var toolbar = '';
+    if (total > 200 || visible.length < total) {
+      var countText = visible.length < total
+        ? '共 ' + total + ' 行（当前显示前 ' + visible.length + ' 行）'
+        : '共 ' + total + ' 行';
+      toolbar = '<div class="rpt-toolbar"><span class="rpt-count">' + h(countText) + '</span>' +
+        '<span class="rpt-hint">横向可滚动，表头与科目列固定</span></div>';
+    }
+
+    var groups = groupColumns(columns);
+    var lead = '<th class="rpt-sticky-1 rpt-th-corner" rowspan="2">科目</th>' +
+      '<th class="rpt-sticky-2 rpt-th-corner" rowspan="2">编码</th>';
+
+    var body = visible.map(function (row) {
+      var level = Number(row.level) || 1;
+      var indent = new Array(Math.max(0, level - 1) + 1).join('　'); /* 全角空格缩进 */
+      var path = Array.isArray(row.path) && row.path.length ? row.path.join(' / ') : (row.name || '');
+      var cells = row.cells || {};
+      var tds = columns.map(function (c) {
+        return valueCell(cells[c.key], unitOf(row, matrix));
+      }).join('');
+      return '<tr data-code="' + h(row.code) + '"' + (row.hasData === false ? ' class="row-empty"' : '') + '>' +
+        '<td class="rpt-sticky-1 rpt-subject lv' + level + '" title="' + h(path) + '">' +
+        '<div class="rpt-cell">' + h(indent + (row.name || '')) + '</div></td>' +
+        '<td class="rpt-sticky-2 rpt-code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
+        tds + '</tr>';
+    }).join('');
+
+    el.innerHTML = toolbar + noColsNote +
+      '<div class="rpt-wrap">' +
+      '<table class="rpt-table rpt-matrix"><thead>' + headRows(groups, lead) + '</thead>' +
+      '<tbody>' + body + '</tbody></table></div>';
+
+    var table = P.qs ? P.qs('.rpt-table', el) : el.querySelector('.rpt-table');
+    var onClick = null;
+
+    syncSticky(table);
+
+    if (typeof options.onRowClick === 'function' && table) {
+      table.classList.add('is-clickable');
+      onClick = function (e) {
+        var tr = closestRow(e.target, table);
+        if (tr && tr.getAttribute('data-code')) options.onRowClick(tr.getAttribute('data-code'), tr);
+      };
+      table.addEventListener('click', onClick);
+    }
+
+    return {
+      destroy: function () {
+        if (table && onClick) table.removeEventListener('click', onClick);
+        el.innerHTML = '';
+      }
+    };
+  }
+
+  /* ---------------- 3) 趋势折线图 ---------------- */
+
+  /* 无 Chart.js 时的降级表格：月份 × 系列，不做任何汇总 */
+  function trendFallback(trend) {
+    var labels = trend.labels || [];
+    var series = trend.series || [];
+    var head = '<th class="rpt-sticky-1">月份</th>' + series.map(function (s) {
+      return '<th>' + h(s.name || s.code || '') + '</th>';
+    }).join('');
+    var body = labels.map(function (label, i) {
+      var tds = series.map(function (s) {
+        return valueCell((s.values || [])[i], 'money');
+      }).join('');
+      return '<tr><td class="rpt-sticky-1 rpt-subject">' + h(label) + '</td>' + tds + '</tr>';
+    }).join('');
+    return '<div class="rpt-wrap rpt-trend-fallback"><table class="rpt-table rpt-report">' +
+      '<thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>' +
+      '<div class="rpt-hint">图表组件未加载，已降级为数据表展示</div>';
+  }
+
+  function renderTrend(el, trend, options) {
+    options = options || {};
+    if (!el) return { destroy: function () {} };
+    el.innerHTML = '';
+
+    trend = trend || {};
+    var labels = Array.isArray(trend.labels) ? trend.labels : [];
+    var series = Array.isArray(trend.series) ? trend.series : [];
+
+    if (!labels.length || !series.length) {
+      el.innerHTML = emptyBox('所选科目暂无月度数据');
+      return { destroy: function () {} };
+    }
+
+    /* Chart.js 缺失或初始化失败都走降级表格 */
+    if (typeof window.Chart !== 'function') {
+      el.innerHTML = trendFallback(trend);
+      return { destroy: function () { el.innerHTML = ''; } };
+    }
+
+    var height = Number(options.height) || 260;
+    var box = document.createElement('div');
+    box.className = 'rpt-trend';
+    box.style.height = height + 'px';
+    var canvas = document.createElement('canvas');
+    box.appendChild(canvas);
+    el.appendChild(box);
+
+    var datasets = series.map(function (s, i) {
+      var color = PALETTE[i % PALETTE.length];
+      return {
+        label: s.name || s.code || ('系列 ' + (i + 1)),
+        data: (s.values || []).map(function (v) { return toNumber(v); }),
+        borderColor: color,
+        backgroundColor: color,
+        borderWidth: 2,
+        tension: 0.3,
+        pointRadius: 2.5,
+        pointHoverRadius: 5,
+        pointBackgroundColor: '#fff',
+        pointBorderColor: color,
+        pointBorderWidth: 2,
+        spanGaps: true,
+        fill: false
+      };
+    });
+
+    var chart = null;
+    try {
+      chart = new window.Chart(canvas, {
+        type: 'line',
+        data: { labels: labels, datasets: datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 300 },
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { boxWidth: 8, boxHeight: 8, usePointStyle: true, padding: 14, font: { size: 11 }, color: '#667085' }
+            },
+            tooltip: {
+              callbacks: {
+                label: function (ctx) {
+                  var name = (ctx.dataset && ctx.dataset.label) || '';
+                  var v = ctx.parsed ? ctx.parsed.y : ctx.raw;
+                  var txt = typeof P.fmtMoney === 'function' ? P.fmtMoney(v, 2) : String(v);
+                  return name + '：' + txt;
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { font: { size: 11 }, color: '#667085', maxRotation: 0, autoSkip: true }
+            },
+            y: {
+              grid: { color: '#eef2f7' },
+              ticks: {
+                font: { size: 11 },
+                color: '#667085',
+                callback: function (v) {
+                  return typeof P.fmtCompact === 'function' ? P.fmtCompact(v) : v;
+                }
+              }
+            }
+          }
+        }
+      });
+    } catch (err) {
+      /* 初始化异常同样降级，不打断整页渲染 */
+      el.innerHTML = trendFallback(trend);
+      return { destroy: function () { el.innerHTML = ''; } };
+    }
+
+    return {
+      destroy: function () {
+        if (chart && typeof chart.destroy === 'function') chart.destroy();
+        chart = null;
+        el.innerHTML = '';
+      }
+    };
+  }
+
+  /* ---------------- 4) 管报预览（正式版式） ---------------- */
+
+  function renderReport(el, matrix, options) {
+    options = options || {};
+    if (!el) return { destroy: function () {} };
+    el.innerHTML = '';
+
+    matrix = matrix || {};
+    var rows = Array.isArray(matrix.rows) ? matrix.rows : [];
+    var columns = Array.isArray(matrix.columns) ? matrix.columns : [];
+
+    if (!rows.length) {
+      var noLevel = Array.isArray(options.levels) && !options.levels.length;
+      var tip0 = emptyBox(noLevel
+        ? '未勾选任何科目层级，报表为空白。请在左侧勾选要显示的层级。'
+        : '当前层级与筛选条件下没有可生成的管报数据，请在左侧调整勾选的层级');
+      var rail0 = Array.isArray(options.levels) ? levelRailHtml(options.levels, 0) : '';
+      el.innerHTML = rail0
+        ? '<div class="rpt-with-rail">' + rail0 + '<div class="rpt-rail-main">' + tip0 + '</div></div>'
+        : tip0;
+      var b0 = bindRail(el, options);
+      return {
+        destroy: function () { if (b0) b0.box.removeEventListener('change', b0.onChange); el.innerHTML = ''; }
+      };
+    }
+    var noColsNote = columns.length ? '' :
+      '<div class="rpt-diag rpt-diag-warn">当前筛选条件没有匹配的明细，模板 ' + rows.length +
+      ' 行全部为 0。因未指定月份且数据中没有可识别的期间，未生成月份列。</div>';
+
+    var groups = groupColumns(columns);
+    var shown = leadLevels(options.levels);
+    /* 占比列：默认不显示，由调用方 options.showPct 控制 */
+    var showPct = options.showPct === true;
+    var basisRow = findBasisRow(matrix);
+    var basisName = (basisRow && basisRow.name) || '销售收入';
+    var basisCells = basisRow && basisRow.cells ? basisRow.cells : null;
+    var lead = shown.map(function (lv, idx) {
+      return '<th class="rpt-lead rpt-th-corner" data-lead="' + idx + '" data-lv="' + lv +
+        '" rowspan="2">' + LEVEL_LABEL[lv - 1] + '</th>';
+    }).join('') +
+      '<th class="rpt-lead rpt-lead-last rpt-th-corner" data-lead="' + shown.length +
+      '" data-lv="code" rowspan="2">科目编码</th>';
+
+    /* 严格按 matrix.rows 顺序输出：不重排、不过滤、不合并同名行 */
+    var lastPath = ['', '', '', ''];
+    var body = rows.map(function (row) {
+      var level = Number(row.level) || 1;
+      var pathArr = Array.isArray(row.path) ? row.path : [];
+      var fullPath = pathArr.length ? pathArr.join(' / ') : (row.name || '');
+      var cells = row.cells || {};
+      var unit = unitOf(row, matrix);
+
+      /* 与上一行同祖先的层级留空，视觉上模拟 Excel 合并单元格；数值不受影响 */
+      var pathTds = '';
+      var sameAncestor = true;
+      for (var i = 0; i < shown.length; i++) {
+        var raw = pathArr[i] == null ? '' : pathArr[i];
+        var show = raw;
+        if (raw && sameAncestor && raw === lastPath[i]) show = '';
+        else if (raw) sameAncestor = false;
+        pathTds += '<td class="rpt-lead rpt-subject lv' + (i + 1) + '" data-lead="' + i +
+          '" data-lv="' + (i + 1) + '" title="' + h(fullPath) + '">' +
+          (show ? '<div class="rpt-cell">' + h(show) + '</div>' : '') + '</td>';
+      }
+      for (var j = 0; j < 4; j++) lastPath[j] = pathArr[j] == null ? '' : pathArr[j];
+
+      var tds = columns.map(function (c) {
+        var valCell = valueCell(cells[c.key], unit);
+        if (!showPct) return valCell;
+        return valCell + pctCell(cells[c.key], unit, basisCells ? basisCells[c.key] : null);
+      }).join('');
+
+      return '<tr data-code="' + h(row.code) + '" class="lv' + level + (row.hasData === false ? ' row-empty' : '') + '">' +
+        pathTds +
+        '<td class="rpt-lead rpt-lead-last rpt-code" data-lead="' + shown.length +
+        '" data-lv="code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
+        tds + '</tr>';
+    }).join('');
+
+    var rail = Array.isArray(options.levels) ? levelRailHtml(options.levels, rows.length) : '';
+    var toolbar = '<div class="rpt-toolbar">' +
+      '<label class="rpt-toggle"><input type="checkbox" data-rpt-pct' + (showPct ? ' checked' : '') +
+      ' /><span>显示占比</span></label>' +
+      '<span class="rpt-hint">占比 = 该科目当期金额 ÷ 当期' + h(basisName) + '；数量、人数类科目不计算占比</span>' +
+      (showPct && !basisRow
+        ? '<span class="rpt-hint-warn">当前视图看不到' + h(basisName) + '，占比无法计算</span>' : '') +
+      '</div>';
+    var inner = noColsNote + toolbar + '<div class="rpt-wrap">' +
+      '<table class="rpt-table rpt-report"><thead>' + headRows(groups, lead, showPct) + '</thead>' +
+      '<tbody>' + body + '</tbody></table></div>';
+    el.innerHTML = rail
+      ? '<div class="rpt-with-rail">' + rail + '<div class="rpt-rail-main">' + inner + '</div></div>'
+      : inner;
+
+    var table = el.querySelector('.rpt-report');
+    var onClick = null;
+
+    syncSticky(table);
+
+    if (typeof options.onRowClick === 'function' && table) {
+      table.classList.add('is-clickable');
+      onClick = function (e) {
+        var tr = closestRow(e.target, table);
+        if (tr && tr.getAttribute('data-code')) options.onRowClick(tr.getAttribute('data-code'), tr);
+      };
+      table.addEventListener('click', onClick);
+    }
+    var bound = bindRail(el, options);
+    var boundPct = bindPct(el, options);
+
+    return {
+      destroy: function () {
+        if (table && onClick) table.removeEventListener('click', onClick);
+        if (bound) bound.box.removeEventListener('change', bound.onChange);
+        if (boundPct) boundPct.box.removeEventListener('change', boundPct.onChange);
+        el.innerHTML = '';
+      }
+    };
+  }
+
+  /* ---------------- 4.1) 左侧层级勾选栏 ---------------- */
+
+  var LEVEL_LABEL = ['一级科目', '二级科目', '三级科目', '四级科目'];
+
+  /* 勾选层级 → 实际要渲染的科目列（1..最高勾选级）。
+     列由最高勾选级决定：勾二级就只出「一级+二级」两列，三级四级列隐藏，
+     这样既遵守「只展示选中级别」的要求，又不至于让下级科目看不出上级归属。 */
+  function leadLevels(levels) {
+    if (!Array.isArray(levels)) return [1, 2, 3, 4];
+    var max = 0;
+    levels.forEach(function (lv) {
+      var n = Math.round(Number(lv));
+      if (n >= 1 && n <= 4 && n > max) max = n;
+    });
+    if (!max) return [];
+    var out = [];
+    for (var i = 1; i <= max; i++) out.push(i);
+    return out;
+  }
+
+  /* 层级勾选栏：四个层级各自独立，可勾可取消；全不勾时报表为空白 */
+  function levelRailHtml(levels, rowCount) {
+    var on = Array.isArray(levels) ? levels : [1, 2, 3, 4];
+    var items = LEVEL_LABEL.map(function (name, i) {
+      var lv = i + 1;
+      return '<label class="rpt-lv-item"><input type="checkbox" data-rpt-level="' + lv + '"' +
+        (on.indexOf(lv) >= 0 ? ' checked' : '') + ' /><span>' + name + '</span></label>';
+    }).join('');
+    var cols = leadLevels(on);
+    var hint = !on.length
+      ? '未勾选任何层级，报表为空。'
+      : (cols.length < 4 ? '表格只显示到' + LEVEL_LABEL[cols.length - 1] + '，更低的层级列已隐藏。' : '');
+    return '<aside class="rpt-rail">' +
+      '<div class="rpt-rail-title">显示层级</div>' + items +
+      '<div class="rpt-rail-count">' + (rowCount == null ? '' : '共 ' + rowCount + ' 行') + '</div>' +
+      '<div class="rpt-rail-note">四个层级可分别勾选或取消。<br/>' +
+      '只看某一级时，它上面的层级列会自动保留，方便定位归属。' +
+      (hint ? '<br/>' + hint : '') +
+      '</div></aside>';
+  }
+
+  /* 绑定层级变化：每个复选框独立上报，不做 1..N 强制补选 */
+  function bindRail(el, options) {
+    var box = el ? el.querySelector('.rpt-rail') : null;
+    if (!box || typeof options.onLevelsChange !== 'function') return null;
+
+    var onChange = function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || t.getAttribute('data-rpt-level') == null) return;
+      var picked = [];
+      Array.prototype.forEach.call(box.querySelectorAll('input[data-rpt-level]'), function (cb) {
+        if (cb.checked) picked.push(Number(cb.getAttribute('data-rpt-level')));
+      });
+      picked.sort(function (a, b) { return a - b; });
+      options.onLevelsChange(picked);
+    };
+    box.addEventListener('change', onChange);
+    return { box: box, onChange: onChange };
+  }
+
+  /* 占比单元格：只有金额科目才有意义，数量/人数一律留空 */
+  function pctCell(value, unit, basisTotal) {
+    var n = toNumber(value);
+    var b = toNumber(basisTotal);
+    if (unit !== 'money' || n === null || b === null || b === 0) {
+      return '<td class="num nil">—</td>';
+    }
+    var p = n / b * 100;
+    var cls = p < 0 ? 'num pct neg' : 'num pct';
+    return '<td class="' + cls + '">' + p.toFixed(1) + '%</td>';
+  }
+
+  /* ---------------- 4.2) 经营分析报表（参考《经营分析报表》by月份） ---------------- */
+
+  /**
+   * 经营分析报表：四级科目列 + 月份列 + 总计 + 占销售收入比。
+   * @param {Object} matrix engine.buildPeriodMatrix 的产物
+   * @param {Object} options { levels, onLevelsChange, onRowClick, basisLabel }
+   */
+  function renderAnalysis(el, matrix, options) {
+    options = options || {};
+    if (!el) return { destroy: function () {} };
+    el.innerHTML = '';
+
+    matrix = matrix || {};
+    var rows = Array.isArray(matrix.rows) ? matrix.rows : [];
+    var cols = Array.isArray(matrix.columns) ? matrix.columns : [];
+    var basis = matrix.basis || {};
+
+    var rail = Array.isArray(options.levels) ? levelRailHtml(options.levels, rows.length) : '';
+
+    if (!rows.length) {
+      var noLevel2 = Array.isArray(options.levels) && !options.levels.length;
+      var tip = '<div class="empty">' + (noLevel2
+        ? '未勾选任何科目层级，报表为空白。请在左侧勾选要显示的层级。'
+        : '当前层级与筛选条件下没有可展示的科目行，请在左侧调整勾选的层级。') + '</div>';
+      el.innerHTML = rail ? '<div class="rpt-with-rail">' + rail + '<div class="rpt-rail-main">' + tip + '</div></div>' : tip;
+      var b0 = bindRail(el, options);
+      return {
+        destroy: function () { if (b0) b0.box.removeEventListener('change', b0.onChange); el.innerHTML = ''; }
+      };
+    }
+
+    var basisName = options.basisLabel || basis.name || '销售收入';
+    var shownA = leadLevels(options.levels);
+    var showPct = options.showPct === true;
+    var basisRowA = findBasisRow(matrix);
+    var basisCellsA = basisRowA && basisRowA.cells ? basisRowA.cells : null;
+    var head = '<tr>' +
+      shownA.map(function (lv, idx) {
+        return '<th class="rpt-lead rpt-th-corner" data-lead="' + idx + '" data-lv="' + lv + '">' +
+          LEVEL_LABEL[lv - 1] + '</th>';
+      }).join('') +
+      '<th class="rpt-lead rpt-lead-last rpt-th-corner" data-lead="' + shownA.length + '" data-lv="code">科目编码</th>' +
+      cols.map(function (c) {
+        var th = '<th class="rpt-th-period">' + h(c.label || c.key) + '</th>';
+        return showPct ? th + '<th class="rpt-th-period rpt-th-pct" title="' +
+          h((c.label || c.key) + ' 该科目金额 ÷ 同期' + basisName) + '">占比</th>' : th;
+      }).join('') +
+      '<th class="rpt-th-period rpt-th-total">总计</th>' +
+      '<th class="rpt-th-period rpt-th-pct" title="该行合计 ÷ ' + h(basisName) + '合计">占' + h(basisName) + '</th>' +
+      '</tr>';
+
+    var lastPath = ['', '', '', ''];
+    var body = rows.map(function (row) {
+      var level = Number(row.level) || 1;
+      var pathArr = Array.isArray(row.path) ? row.path : [];
+      var fullPath = pathArr.length ? pathArr.join(' / ') : (row.name || '');
+      var cells = row.cells || {};
+      var unit = unitOf(row, matrix);
+
+      var pathTds = '';
+      var sameAncestor = true;
+      for (var i = 0; i < shownA.length; i++) {
+        var raw = pathArr[i] == null ? '' : pathArr[i];
+        var show = raw;
+        if (raw && sameAncestor && raw === lastPath[i]) show = '';
+        else if (raw) sameAncestor = false;
+        pathTds += '<td class="rpt-lead rpt-subject lv' + (i + 1) + '" data-lead="' + i +
+          '" data-lv="' + (i + 1) + '" title="' + h(fullPath) + '">' +
+          (show ? '<div class="rpt-cell">' + h(show) + '</div>' : '') + '</td>';
+      }
+      for (var j = 0; j < 4; j++) lastPath[j] = pathArr[j] == null ? '' : pathArr[j];
+
+      var tds = cols.map(function (c) {
+        var valCell = valueCell(cells[c.key], unit);
+        if (!showPct) return valCell;
+        return valCell + pctCell(cells[c.key], unit, basisCellsA ? basisCellsA[c.key] : null);
+      }).join('');
+
+      return '<tr data-code="' + h(row.code) + '" class="lv' + level + (row.hasData === false ? ' row-empty' : '') + '">' +
+        pathTds +
+        '<td class="rpt-lead rpt-lead-last rpt-code" data-lead="' + shownA.length +
+        '" data-lv="code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
+        tds +
+        '<td class="' + numClass(toNumber(row.total)) + ' rpt-total">' + h(formatCell(row.total, unit)) + '</td>' +
+        pctCell(row.total, unit, basis.total) +
+        '</tr>';
+    }).join('');
+
+    var foot = '<div class="rpt-foot">共 ' + rows.length + ' 行 · 占比基准：' + h(basisName) +
+      '合计 ' + h(formatCell(basis.total, 'money')) + (basis.found === false ? '（当前筛选下未取到该科目）' : '') + '</div>';
+
+    var inner = '<div class="rpt-toolbar"><span class="rpt-count">经营分析报表</span>' +
+      '<label class="rpt-toggle"><input type="checkbox" data-rpt-pct' + (showPct ? ' checked' : '') +
+      ' /><span>显示占比</span></label>' +
+      '<span class="rpt-hint">行 = 科目（按勾选层级），列 = 月份；占比 = 该科目当期金额 ÷ 当期' + h(basisName) + '</span>' +
+      (showPct && !basisRowA ? '<span class="rpt-hint-warn">当前视图看不到' + h(basisName) + '，占比无法计算</span>' : '') +
+      '</div>' +
+      '<div class="rpt-wrap"><table class="rpt-table rpt-analysis"><thead>' + head + '</thead>' +
+      '<tbody>' + body + '</tbody></table></div>' + foot;
+
+    el.innerHTML = rail
+      ? '<div class="rpt-with-rail">' + rail + '<div class="rpt-rail-main">' + inner + '</div></div>'
+      : inner;
+
+    var table = el.querySelector('.rpt-analysis');
+    var onClick = null;
+    syncSticky(table);
+    if (typeof options.onRowClick === 'function' && table) {
+      table.classList.add('is-clickable');
+      onClick = function (e) {
+        var tr = closestRow(e.target, table);
+        if (tr && tr.getAttribute('data-code')) options.onRowClick(tr.getAttribute('data-code'), tr);
+      };
+      table.addEventListener('click', onClick);
+    }
+    var bound = bindRail(el, options);
+    var boundPct = bindPct(el, options);
+
+    return {
+      destroy: function () {
+        if (table && onClick) table.removeEventListener('click', onClick);
+        if (bound) bound.box.removeEventListener('change', bound.onChange);
+        if (boundPct) boundPct.box.removeEventListener('change', boundPct.onChange);
+        el.innerHTML = '';
+      }
+    };
+  }
+
+  /* ---------------- 导出 ---------------- */
+
+  window.PAReportView = {
+    renderMeta: renderMeta,
+    renderMatrix: renderMatrix,
+    renderTrend: renderTrend,
+    renderReport: renderReport,
+    renderAnalysis: renderAnalysis,
+    formatCell: formatCell,
+    /* 供外部复用的常量与工具 */
+    PALETTE: PALETTE,
+    fmtLocalTime: fmtLocalTime,
+    unitOf: unitOf,
+    LEVEL_LABEL: LEVEL_LABEL
+  };
+})();

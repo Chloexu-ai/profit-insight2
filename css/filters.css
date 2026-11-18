@@ -1,0 +1,43 @@
+/* ===== M3 多选筛选控件 ===== */
+.ms-filter { position: relative; min-width: 152px; }
+.ms-filter > .tiny-text { display: block; margin-bottom: 4px; color: var(--text-soft); }
+.ms-trigger { position: relative; width: 100%; display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 7px 9px;
+  text-align: left; color: var(--text); }
+.ms-trigger:hover { border-color: var(--primary); }
+.ms-trigger:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.ms-summary { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ms-caret { color: var(--text-mute); font-size: 10px; }
+.ms-count { background: var(--primary); color: #fff; font-size: 11px; line-height: 1;
+  border-radius: 9px; padding: 2px 6px; }
+.ms-panel { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: 268px;
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(16,24,40,.12); padding: 10px; }
+.ms-search input { width: 100%; border: 1px solid var(--line); border-radius: 7px;
+  padding: 6px 8px; font-size: 13px; outline: none; }
+.ms-search input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.ms-all { display: flex; align-items: center; gap: 7px; margin: 8px 0;
+  padding: 6px 6px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  cursor: pointer; background: var(--panel-soft); border-bottom: 1px solid var(--line); }
+.ms-all:hover { background: #eef2f8; }
+.ms-all input { margin: 0; }
+.ms-all span { flex: none; }
+.ms-all-count { margin-left: auto; font-style: normal; font-weight: 400;
+  font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.ms-options { max-height: 240px; overflow: auto; border-top: 1px solid var(--line); padding-top: 6px; }
+.ms-opt { display: flex; align-items: center; gap: 7px; padding: 5px 4px; border-radius: 6px;
+  font-size: 13px; cursor: pointer; }
+.ms-opt:hover { background: var(--panel-soft); }
+.ms-opt input { margin: 0; }
+.ms-opt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-foot { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--text-mute); display: flex; justify-content: space-between; }
+.ms-empty { padding: 10px 4px; font-size: 13px; color: var(--text-mute); text-align: center; }
+
+/* 视图切换 */
+.m3-views { display: inline-flex; background: var(--panel-soft); border-radius: 9px; padding: 3px; gap: 2px; }
+.m3-views button { border: 0; background: transparent; padding: 6px 14px; border-radius: 7px;
+  font-size: 13px; color: var(--text-soft); }
+.m3-views button.active { background: #fff; color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 3px rgba(16,24,40,.1); }
+.m3-toolbar-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0; }

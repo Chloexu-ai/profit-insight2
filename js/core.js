@@ -341,7 +341,95 @@
     const def = subjectDef();
     /* 编码 → 名称：先查统计 codes，再查全量别名映射（覆盖四级明细编码） */
     const name = P.subjectCodeToName(s) || (def.aliasesMap && (def.aliasesMap[s] || def.aliasesMap[s.toLowerCase()])) || s;
+    if (name && name !== s) return String(name);
+    /* 旧映射失败时兜底查 201 条管报注册表（新编码如 6602030101 → 平台佣金） */
+    const reg = P.reportRegistry();
+    if (reg && s && reg.byCode[s]) return reg.byCode[s].name;
     return name == null ? '' : String(name);
+  };
+
+  /* ---------------- 管报科目模板（management-v1，201 条） ----------------
+   * 注册表由 js/report/subjects.js 挂载到 window.PA_REPORT_SUBJECTS。
+   * 模板里 40+ 个名称重名（如「平台佣金」「业务招待费」），必须按编码区分，
+   * 任何场景都不允许按名称合并。注册表未加载时所有接口安全降级。
+   * ------------------------------------------------------------------ */
+  P.reportRegistry = function () {
+    return window.PA_REPORT_SUBJECTS || null;
+  };
+
+  /* 名称归一化索引（去掉空格/括号/连字符等），仅作精确匹配失败后的兜底 */
+  let subjectNameIndex = null;
+  let subjectNameIndexFor = null;
+  function normalizedSubjectIndex(reg) {
+    if (subjectNameIndexFor === reg) return subjectNameIndex;
+    const idx = {};
+    (reg.list || []).forEach((s) => {
+      [s.name].concat(s.alt || []).forEach((n) => {
+        const k = norm(n);
+        if (!k) return;
+        if (!idx[k]) idx[k] = [];
+        if (idx[k].indexOf(s) < 0) idx[k].push(s);
+      });
+    });
+    subjectNameIndex = idx;
+    subjectNameIndexFor = reg;
+    return idx;
+  }
+
+  function resolveSubjectByName(name, fromCode) {
+    const out = { code: '', name: String(name == null ? '' : name), match: null, error: null, candidates: [] };
+    const reg = P.reportRegistry();
+    if (!reg) { out.error = 'unknown_name'; return out; }
+    let hits = (reg.byName && reg.byName[name]) || [];
+    if (!hits.length) hits = normalizedSubjectIndex(reg)[norm(name)] || [];
+    if (!hits.length) { out.error = 'unknown_name'; return out; }
+    if (hits.length === 1) {
+      out.code = hits[0].code;
+      out.name = hits[0].name;
+      out.match = fromCode ? 'code' : 'name';
+      return out;
+    }
+    out.error = 'ambiguous_name';
+    out.candidates = hits.map((s) => s.code);
+    return out;
+  }
+
+  /* 解析科目录入值：编码（含旧 4 位编码）或中文名称 → 唯一注册表科目 */
+  P.resolveSubjectValue = function (raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    const out = { code: '', name: '', match: null, error: null, candidates: [] };
+    if (!s) return out;
+    if (/^\d+$/.test(s)) {
+      const reg = P.reportRegistry();
+      if (reg && reg.byCode[s]) {
+        out.code = s;
+        out.name = reg.byCode[s].name;
+        out.match = 'code';
+        return out;
+      }
+      /* 旧编码（1101/2101…）自 v0.12.1 起停用：不再按旧名称回退，
+         否则同名科目会被旧码悄悄并到新科目上。这里直接报未知编码并给出提示。 */
+      out.error = 'unknown_code';
+      out.hint = /^\d{4}$/.test(s) ? 'legacy_code' : '';
+      return out;
+    }
+    return resolveSubjectByName(s, false);
+  };
+
+  /* 按完整路径精确匹配唯一科目：['销售费用','Tiktok市场营销费用','平台费用','平台佣金'] 或 'a|b|c|d' */
+  P.resolveSubjectPath = function (pathArr) {
+    const reg = P.reportRegistry();
+    if (!reg) return null;
+    let parts;
+    if (Array.isArray(pathArr)) parts = pathArr;
+    else parts = String(pathArr == null ? '' : pathArr).split('|');
+    const key = parts.map((p) => String(p == null ? '' : p).trim()).filter(Boolean).join('|');
+    if (!key) return null;
+    const list = reg.list || [];
+    for (let i = 0; i < list.length; i++) {
+      if ((list[i].path || []).join('|') === key) return list[i];
+    }
+    return null;
   };
   /* 从科目树重建 subject 字典（用户导入科目主数据时调用）。
      tree: [{c:编码, n:末级名, p:[路径...], l:一级科目}]
@@ -393,10 +481,21 @@
     try { sessionStorage.setItem('pa_data_view', key); } catch (e) {}
     return true;
   };
-  /* 当前视图可见的科目标准名数组；null 表示全部可见 */
+  /* 当前视图可见的科目标准名数组；null 表示全部可见
+   * 两种授权口径：
+   * - range：按科目名称区间截取（依赖 PA_DICT 的值顺序，模板换版后顺序会变，慎用）
+   * - list ：显式名称白名单（模板换版也不会因为顺序变化而放宽范围，推荐） */
   P.visibleSubjects = function () {
     const v = P.currentView();
-    if (!v || v.subjectMode === 'all' || !v.subjectRange) return null;
+    if (!v || v.subjectMode === 'all') return null;
+    if (v.subjectMode === 'list') {
+      const allow = Array.isArray(v.subjectList) ? v.subjectList : [];
+      if (!allow.length) return [];
+      const values = subjectDef().values || [];
+      /* 只保留确实存在于当前模板的名称，避免白名单里残留已删除科目 */
+      return allow.filter(function (n) { return values.indexOf(n) >= 0; });
+    }
+    if (!v.subjectRange) return null;
     const values = subjectDef().values || [];
     const [a, b] = v.subjectRange;
     const i = values.indexOf(a), j = values.indexOf(b);
@@ -417,6 +516,39 @@
   };
   /* 当前视图是否处于受限模式 */
   P.isRestrictedView = function () { return !!P.visibleSubjects(); };
+
+  /* 当前视图可见的科目编码数组（注册表编码）；全部可见返回 null
+   * 判定规则：只看科目名称是否命中旧白名单。**不按一级科目名向下放开**——
+   * 「销售费用」可见不代表其下 100+ 个明细科目可见，否则等于放宽数据权限。
+   * 注册表未加载时返回 null，由调用方回退到旧名称口径（P.canSeeSubject）。
+   * 原则：只做「收窄」，拿不准一律判不可见。 */
+  P.visibleSubjectCodes = function () {
+    const allowed = P.visibleSubjects();
+    if (!allowed) return null;
+    const reg = P.reportRegistry();
+    if (!reg) return null;
+    const set = {};
+    allowed.forEach((n) => { set[n] = true; });
+    return (reg.list || []).filter((s) => set[s.name]).map((s) => s.code);
+  };
+
+  /* 单条科目编码是否可见：支持新 6~10 位编码，也兼容旧 4 位编码 */
+  P.canSeeSubjectCode = function (code) {
+    const c = String(code == null ? '' : code).trim();
+    if (!c) return false;
+    const allowed = P.visibleSubjects();
+    if (!allowed) return true;
+    const reg = P.reportRegistry();
+    if (!reg) return P.canSeeSubject(c); /* 注册表未加载：沿用旧名称比对，行为与改造前一致 */
+    let subject = reg.byCode[c];
+    if (!subject) {
+      /* 旧编码或别名：先解析再判定；解析不出则认为不可见（保守） */
+      const res = P.resolveSubjectValue(c);
+      subject = res.match && reg.byCode[res.code] ? reg.byCode[res.code] : null;
+    }
+    if (!subject) return false;
+    return allowed.indexOf(subject.name) >= 0;
+  };
 
   /* ---------------- 主数据在线维护 ---------------- */
   P.defaultDict = function () {
@@ -494,7 +626,8 @@
   function rebuildFields() {
     const dict = window.PA_DICT || {};
     P._allFields = [...(dict.dimensions || []), ...(dict.metrics || [])];
-    P.ALL_KEYS = [...dimKeys, ...numKeys];
+    /* subject_code 只作为科目编码载体，不进入 DIM_KEYS，避免筛选栏出现无意义维度 */
+    P.ALL_KEYS = [...dimKeys, ...numKeys, 'subject_code'];
     P.DIM_KEYS = dimKeys;
     P.NUM_KEYS = numKeys;
     P.TEMPLATE_KEYS = ['month', 'data_type', 'site', 'platform', 'channel', 'material', 'brand', 'category', 'report_product', 'subject', 'amount'];
@@ -507,6 +640,7 @@
     numKeys.forEach((k) => { row[k] = 0; });
     row.month = '未指定月份';
     row.data_type = '实际数';
+    row.subject_code = '';
     return row;
   }
 
@@ -525,6 +659,31 @@
     if (role === 'budget' && isCost && !found.has('budget_cost')) row.budget_cost += amount;
   }
 
+  /* 科目单元格清洗：编码/旧编码/名称 → row.subject（标准名称）+ row.subject_code（注册表编码）
+   * bucket 收集歧义/未知/旧编码未映射三类情况，循环结束后统一生成中文提示。 */
+  function cleanSubjectCell(row, val, bucket) {
+    const s = val == null ? '' : String(val).trim();
+    if (!s) { row.subject = '未分类'; row.subject_code = ''; return; }
+    /* 注册表未加载：沿用旧口径，不产生新提示，避免误报 */
+    if (!P.reportRegistry()) { row.subject = P.normalizeDim('subject', s) || s; row.subject_code = ''; return; }
+    const res = P.resolveSubjectValue(s);
+    if (res.match) {
+      row.subject = res.name;
+      row.subject_code = res.code;
+      return;
+    }
+    /* 解析失败：保留原值，绝不任选一个候选，也绝不静默丢弃 */
+    row.subject = res.name || s;
+    row.subject_code = '';
+    if (res.error === 'ambiguous_name') {
+      bucket.ambiguous[s] = { name: row.subject, count: (res.candidates || []).length };
+    } else if (res.hint === 'legacy_code') {
+      /* 旧 4 位编码已停用，必须换新编码重导，否则这一行不会进任何科目 */
+      bucket.legacy[s] = s;
+    } else {
+      bucket.unknown[s] = s;
+    }
+  }
   /* ---------------- 文本文件编码探测 ----------------
      中文 Windows 下 Excel 另存的 CSV 默认是 GBK/ANSI 编码，浏览器按 UTF-8 读会把
      「月份」等表头变成乱码。用 UTF-8 严格模式探测：能无损解码就是 UTF-8，
@@ -771,6 +930,7 @@
 
     const rows = [];
     const seen = new Set();
+    const subjectIssues = { ambiguous: {}, unknown: {}, legacy: {}, clash: {} };
     let bad = 0;
     for (let i = 1; i < rawRows.length; i++) {
       const raw = rawRows[i];
@@ -786,6 +946,8 @@
           row[key] = n;
         } else if (key === 'month' || key === 'period') {
           row[key] = P.parsePeriod(val);
+        } else if (key === 'subject') {
+          cleanSubjectCell(row, val, subjectIssues);
         } else {
           const s = val == null || String(val).trim() === '' ? '' : String(val).trim();
           row[key] = s ? P.normalizeDim(key, s) : (key === 'data_type' ? '实际数' : '未分类');
@@ -800,6 +962,33 @@
       rows.push(row);
     }
     if (bad) issues.push(bad + ' 个金额单元格无法解析，已按 0 处理');
+    const ambKeys = Object.keys(subjectIssues.ambiguous);
+    if (ambKeys.length) {
+      const sample = ambKeys.slice(0, 3).map((k) => {
+        const it = subjectIssues.ambiguous[k];
+        return '「' + it.name + '」(' + it.count + ' 个同名编码)';
+      }).join('、');
+      issues.push('科目同名多编码，已保留名称但未写入编码：' + sample +
+        (ambKeys.length > 3 ? ' 等 ' + ambKeys.length + ' 种' : '') + '；请在「科目编码」列填写编码以便区分');
+    }
+    const unkKeys = Object.keys(subjectIssues.unknown);
+    if (unkKeys.length) {
+      issues.push(unkKeys.length + ' 个科目无法匹配科目编码表，已按原值保留：' +
+        unkKeys.slice(0, 5).join('、') + (unkKeys.length > 5 ? ' 等' : ''));
+    }
+    const legacyKeys = Object.keys(subjectIssues.legacy);
+    if (legacyKeys.length) {
+      issues.push('旧版科目编码已停用（' + legacyKeys.slice(0, 5).join('、') + (legacyKeys.length > 5 ? ' 等 ' + legacyKeys.length + ' 个' : '') +
+        '）：这些行未写入编码，报表里不会归集；请用《管报格式.xlsx》的新编码重新导入');
+    }
+    const clashKeys = Object.keys(subjectIssues.clash);
+    if (clashKeys.length) {
+      issues.push('以下编码新旧模板含义不同，已按新模板（201 条）解释，请核对数据口径：' +
+        clashKeys.slice(0, 5).map((k) => {
+          const it = subjectIssues.clash[k];
+          return k + '（新：' + it.newName + ' / 旧：' + it.oldName + '）';
+        }).join('、'));
+    }
     return { rows, mapping, issues, columns: P.ALL_KEYS.filter((k) => found.has(k) || k === 'month') };
   };
 
