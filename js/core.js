@@ -97,6 +97,44 @@
   P.dbInsert = async function (table, row) {
     return P.unwrap(await cloud.database.from(table).insert(row).select(), '写入' + table + '失败');
   };
+  /* 静默插入：不带 .select()，服务端不回传整行。
+     大数据集（宽表 rows_json 可达数 MB）若回传会撑爆响应体导致 Failed to fetch。 */
+  P.dbInsertQuiet = async function (table, row) {
+    const res = await cloud.database.from(table).insert(row);
+    if (res && res.error) {
+      const e = new Error(res.error.message || '写入' + table + '失败');
+      e.code = res.error.code;
+      throw e;
+    }
+    return true;
+  };
+  /* ---------------- 文本 gzip 压缩（浏览器原生 CompressionStream） ----------------
+     把大 JSON 压成 base64 字符串存储，降低请求/响应体。
+     不支持 CompressionStream 的环境返回 null，调用方回退明文存储。 */
+  P.compressText = async function (text) {
+    if (typeof CompressionStream === 'undefined') return null;
+    try {
+      const bytes = new TextEncoder().encode(text);
+      const cs = new CompressionStream('gzip');
+      const w = cs.writable.getWriter();
+      w.write(bytes); w.close();
+      const buf = await new Response(cs.readable).arrayBuffer();
+      const u8 = new Uint8Array(buf);
+      let bin = ''; const CH = 0x8000;
+      for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+      return btoa(bin);
+    } catch (e) { return null; }
+  };
+  P.decompressText = async function (b64) {
+    const bin = atob(b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const ds = new DecompressionStream('gzip');
+    const w = ds.writable.getWriter();
+    w.write(u8); w.close();
+    const buf = await new Response(ds.readable).arrayBuffer();
+    return new TextDecoder().decode(buf);
+  };
   P.dbUpdate = async function (table, id, patch) {
     const data = P.unwrap(await cloud.database.from(table).update(patch).eq('id', id).select(), '更新失败');
     if (!Array.isArray(data) || data.length === 0) throw new Error('没有可更新的记录，可能不属于当前用户或权限不足');
@@ -653,6 +691,22 @@
       bucket.unknown[s] = s;
     }
   }
+  /* ---------------- 文本文件编码探测 ----------------
+     中文 Windows 下 Excel 另存的 CSV 默认是 GBK/ANSI 编码，浏览器按 UTF-8 读会把
+     「月份」等表头变成乱码。用 UTF-8 严格模式探测：能无损解码就是 UTF-8，
+     遇到非法字节则回退 GBK，兼容两种编码。返回解码后的字符串供 XLSX 解析。 */
+  P.decodeCsvBytes = function (buf) {
+    const bytes = new Uint8Array(buf);
+    if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+      try { return new TextDecoder('utf-8').decode(bytes.subarray(3)); } catch (e) {}
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (e) {
+      try { return new TextDecoder('gbk').decode(bytes); }
+      catch (e2) { return new TextDecoder('utf-8').decode(bytes); }
+    }
+  };
 
   /* ---------------- 宽表（科目横排）识别与展开 ----------------
    * 长表：科目占一列、每个科目一行（维度 × 科目 交叉，行数膨胀）。
@@ -686,17 +740,46 @@
     return null;
   };
 
-  /* 检测宽表：存在科目列头，且不存在明确的「科目」字段列 */
+  /* 检测宽表：存在科目列头，且不存在明确的「科目」字段列。
+     每个列头依次尝试：① 字典识别 ② 数字编码兜底（自有科目主数据编码）。
+     两来源统一收集，支持「字典编码 + 自有编码」混合的宽表。 */
   P.detectWide = function (rawRows) {
     if (!Array.isArray(rawRows) || rawRows.length < 2) return null;
     const headers = rawRows[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
     if (headers.some((h) => P.inferField(h) === 'subject')) return null;
+
     const subjectCols = [];
+    const numericFallback = [];
     headers.forEach((h, i) => {
+      /* ① 字典识别（含 编码、编码(名称)、科目标准名） */
       const name = P.subjectHeaderName(h);
-      if (name) subjectCols.push({ index: i, header: h, subject: name });
+      if (name) { subjectCols.push({ index: i, header: h, subject: name }); return; }
+      /* ② 数字编码兜底：自有科目主数据编码（如 6402、9004、6602010112），
+         字典查不到也可用。纯编码或 编码(名称) 都取前置数字；带中文名直接用该名。 */
+      const s = String(h).trim();
+      const m = s.match(/^(\d{4,10})(?:\s*[（(]\s*([^)）]+)[)）])?\s*$/);
+      if (!m) return;
+      const fromDict = P.subjectDisplay(m[1]);
+      const known = fromDict && fromDict !== m[1] ? fromDict : (m[2] ? String(m[2]).trim() : m[1]);
+      numericFallback.push({ index: i, header: h, subject: known });
     });
+
+    /* 数字兜底列需验证数据区确为数值，避免把普通数字文本列误判成科目列。
+       若已有字典科目列，说明整体就是宽表，兜底列直接采信；否则要求至少 2 列。 */
+    if (numericFallback.length) {
+      const allNumeric = numericFallback.every((c) => {
+        for (let r = 1; r < Math.min(rawRows.length, 5); r++) {
+          const v = rawRows[r] && rawRows[r][c.index];
+          if (v != null && String(v).trim() !== '' && !P.parseNumber(v)) return false;
+        }
+        return true;
+      });
+      if (allNumeric && (subjectCols.length > 0 || numericFallback.length >= 2)) {
+        numericFallback.forEach((c) => subjectCols.push(c));
+      }
+    }
     if (!subjectCols.length) return null;
+    subjectCols.sort((a, b) => a.index - b.index);
     return { headers: headers, subjectCols: subjectCols };
   };
 
@@ -719,6 +802,110 @@
       });
     }
     return { rows: out.concat(expanded), count: expanded.length, subjects: subjectCols.map((c) => c.subject) };
+  };
+
+  /* ---------------- 数据集存储抽象（宽表源 gzip 压缩存储，读取时解压+展开） ----------------
+     宽表科目横排展开后可达十几万行、几十 MB。若把展开表或 2.5MB 的宽表明文
+     直接写进 rows_json，会超出云端请求体/响应体限制，报 Failed to fetch。方案：
+       - 入库只存「源宽表二维数组的 gzip(base64)」+ 展开元数据 pa_store；
+       压缩后仅约 0.6~0.8MB，远低于网关限制；写库用 dbInsertQuiet 不回传整行。
+       - 加载数据集后 hydrateDatasets() 异步解压+展开，缓存到 WeakMap；
+       - datasetRows() 同步读缓存，M2/M3/M4/M1 预览调用方式不变。 */
+  const _wideExpandCache = new WeakMap();
+  const GZIP_PREFIX = '@GZIP:';
+
+  /* 由「源二维数组 + 展开结果」生成入库 payload（异步，压缩宽表源）。
+     wide 非空时按压缩宽表存储；否则按普通长表存储（保持旧行为）。 */
+  P.prepareDatasetPayload = async function (rawRows, wide, expandedRows, base) {
+    const payload = Object.assign({}, base || {});
+    if (wide) {
+      const src = JSON.stringify(rawRows);
+      const compressed = await P.compressText(src);
+      if (compressed) {
+        payload.rows_json = GZIP_PREFIX + compressed;   // 压缩串存 rows_json（jsonb 文本）
+        payload.pa_store = { kind: 'wide', compressed: true, subjectCols: wide.subjectCols.map((c) => ({ index: c.index, subject: c.subject })) };
+      } else {
+        /* 环境不支持 CompressionStream：回退明文宽表（小数据集仍可用） */
+        payload.rows_json = rawRows;
+        payload.pa_store = { kind: 'wide', compressed: false, subjectCols: wide.subjectCols.map((c) => ({ index: c.index, subject: c.subject })) };
+      }
+      payload.row_count = expandedRows ? expandedRows.length : 0;
+    } else {
+      payload.rows_json = expandedRows;
+      payload.row_count = expandedRows ? expandedRows.length : 0;
+    }
+    return payload;
+  };
+
+  /* 把宽表数据集的 rows_json 还原成源二维数组（兼容压缩/明文） */
+  P.wideSourceRows = async function (ds) {
+    if (!ds || !ds.pa_store || ds.pa_store.kind !== 'wide') return null;
+    const rj = ds.rows_json;
+    if (typeof rj === 'string' && rj.indexOf(GZIP_PREFIX) === 0) {
+      const json = await P.decompressText(rj.slice(GZIP_PREFIX.length));
+      return JSON.parse(json);
+    }
+    return Array.isArray(rj) ? rj : null;
+  };
+
+  /* 加载数据集后调用：异步解压+展开所有压缩宽表，并缓存。失败的数据集标记 _loadError 便于提示。 */
+  P.hydrateDatasets = async function (list) {
+    if (!Array.isArray(list)) return list;
+    await Promise.all(list.map(async (ds) => {
+      if (!ds || !ds.pa_store || ds.pa_store.kind !== 'wide') return;
+      try {
+        const src = await P.wideSourceRows(ds);
+        if (!src) { _wideExpandCache.set(ds, []); return; }
+        const headers = src[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
+        const wide = { headers: headers, subjectCols: ds.pa_store.subjectCols || [] };
+        const ex = P.expandWideRows(src, wide);
+        const cl = P.cleanRows(ex.rows);
+        _wideExpandCache.set(ds, cl.rows);
+      } catch (e) {
+        ds._loadError = '数据解压失败：' + (e && e.message ? e.message : e);
+        _wideExpandCache.set(ds, []);
+      }
+    }));
+    return list;
+  };
+
+  /* 统一读取入口：同步返回「内部长表对象数组」。
+     宽表数据集从缓存读（由 hydrateDatasets 预填充）；长表直接返回。
+     若缓存未命中（极端时序），对明文宽表现场展开兜底。 */
+  P.datasetRows = function (ds) {
+    if (!ds) return [];
+    const store = ds.pa_store;
+    if (!store || store.kind !== 'wide') return Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    let cached = _wideExpandCache.get(ds);
+    if (cached) return cached;
+    /* 兜底：明文宽表现场展开（压缩数据必须已 hydrate，此处无法同步解压） */
+    if (Array.isArray(ds.rows_json) && ds.rows_json.length) {
+      let rows = [];
+      try {
+        const headers = ds.rows_json[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
+        const wide = { headers: headers, subjectCols: store.subjectCols || [] };
+        rows = P.cleanRows(P.expandWideRows(ds.rows_json, wide).rows).rows;
+      } catch (e) { rows = []; }
+      _wideExpandCache.set(ds, rows);
+      return rows;
+    }
+    return [];
+  };
+
+  /* 列识别诊断：逐列给出识别结果，便于用户排查「为什么某列没识别」。
+     返回 [{header, field, subject, note}]：field=维度/指标 key，subject=宽表科目列对应的标准科目名 */
+  P.diagnoseHeaders = function (rawRows) {
+    if (!Array.isArray(rawRows) || !rawRows.length) return [];
+    const headers = rawRows[0].map((h, i) => String(h == null ? '' : h).trim() || ('未命名列' + (i + 1)));
+    const wide = P.detectWide(rawRows);
+    const subByIndex = {};
+    if (wide) wide.subjectCols.forEach((c) => { subByIndex[c.index] = c.subject; });
+    return headers.map((h, i) => {
+      const field = P.inferField(h);
+      if (subByIndex[i]) return { header: h, field: 'subject', subject: subByIndex[i], note: '宽表科目列 → ' + subByIndex[i] };
+      if (field) return { header: h, field: field, subject: '', note: '识别为' + (P.measureLabel(field) || field) };
+      return { header: h, field: '', subject: '', note: '未识别（请检查列名）' };
+    });
   };
 
   P.cleanRows = function (rawRows, override) {

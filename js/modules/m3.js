@@ -182,10 +182,10 @@
   function sourceRows() {
     const id = datasetId();
     let rows;
-    if (id == null) rows = P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []);
+    if (id == null) rows = P.state.datasets.flatMap((d) => P.datasetRows(d));
     else {
       const ds = P.state.datasets.find((d) => d.id === id);
-      rows = ds && Array.isArray(ds.rows_json) ? ds.rows_json : [];
+      rows = P.datasetRows(ds);
     }
     /* 数据视图权限剔除敏感科目；再按版本开关排除暂不参与的数据类型 */
     const visible = P.applyDataView(rows);

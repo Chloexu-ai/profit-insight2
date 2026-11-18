@@ -150,7 +150,7 @@
     const status = P.qs('#push-status', currentRoot);
     if (status) status.textContent = '正在检查规则…';
     try {
-      const rows = P.applyDataView(P.state.datasets.flatMap((d) => Array.isArray(d.rows_json) ? d.rows_json : []));
+      const rows = P.applyDataView(P.state.datasets.flatMap((d) => P.datasetRows(d)));
       let fired = 0;
       for (const r of rules) {
         if (!r.enabled) continue;
