@@ -91,17 +91,42 @@
     return groups;
   }
 
-  /* 表头两行：第一行期间分组（colspan），第二行数据类型 */
-  function headRows(groups, leadHeadCells) {
+  /* 表头两行：第一行期间分组（colspan），第二行数据类型；pct=true 时每个数值列后带一个「占比」子列 */
+  function headRows(groups, leadHeadCells, pct) {
     var r1 = leadHeadCells || '';
     var r2 = '';
     groups.forEach(function (g) {
-      r1 += '<th class="rpt-th-period" colspan="' + g.cols.length + '">' + h(g.label) + '</th>';
+      r1 += '<th class="rpt-th-period" colspan="' + (g.cols.length * (pct ? 2 : 1)) + '">' + h(g.label) + '</th>';
       g.cols.forEach(function (c) {
         r2 += '<th class="rpt-th-type" title="' + h(c.label || '') + '">' + h(c.data_type || '') + '</th>';
+        if (pct) {
+          r2 += '<th class="rpt-th-type rpt-th-pct" title="' +
+            h((c.label || '') + ' 该科目金额 ÷ 同期销售收入') + '">占比</th>';
+        }
       });
     });
     return '<tr>' + r1 + '</tr><tr>' + r2 + '</tr>';
+  }
+
+  /* 占比分母：销售收入行（默认 6001，取矩阵里 rollup 后的合计）。
+     当前视图看不到该行时返回 null —— 所有占比显示「—」并给出提示，
+     绝不拿别的科目顶替当分母，否则算出来的是错误百分比。 */
+  function findBasisRow(matrix) {
+    var rows = (matrix && matrix.rows) || [];
+    var code = (matrix && matrix.basis && matrix.basis.code) || '6001';
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && String(rows[i].code) === String(code)) return rows[i];
+    }
+    return null;
+  }
+
+  /* 占比开关：只上报，重算交给调用方（保证和数值列同一份结果） */
+  function bindPct(el, options) {
+    var box = el ? el.querySelector('[data-rpt-pct]') : null;
+    if (!box || typeof options.onPctChange !== 'function') return null;
+    var onChange = function () { options.onPctChange(!!box.checked); };
+    box.addEventListener('change', onChange);
+    return { box: box, onChange: onChange };
   }
 
   /* 数值单元格 */
@@ -444,6 +469,11 @@
 
     var groups = groupColumns(columns);
     var shown = leadLevels(options.levels);
+    /* 占比列：默认不显示，由调用方 options.showPct 控制 */
+    var showPct = options.showPct === true;
+    var basisRow = findBasisRow(matrix);
+    var basisName = (basisRow && basisRow.name) || '销售收入';
+    var basisCells = basisRow && basisRow.cells ? basisRow.cells : null;
     var lead = shown.map(function (lv, idx) {
       return '<th class="rpt-lead rpt-th-corner" data-lead="' + idx + '" data-lv="' + lv +
         '" rowspan="2">' + LEVEL_LABEL[lv - 1] + '</th>';
@@ -475,7 +505,9 @@
       for (var j = 0; j < 4; j++) lastPath[j] = pathArr[j] == null ? '' : pathArr[j];
 
       var tds = columns.map(function (c) {
-        return valueCell(cells[c.key], unit);
+        var valCell = valueCell(cells[c.key], unit);
+        if (!showPct) return valCell;
+        return valCell + pctCell(cells[c.key], unit, basisCells ? basisCells[c.key] : null);
       }).join('');
 
       return '<tr data-code="' + h(row.code) + '" class="lv' + level + (row.hasData === false ? ' row-empty' : '') + '">' +
@@ -486,8 +518,15 @@
     }).join('');
 
     var rail = Array.isArray(options.levels) ? levelRailHtml(options.levels, rows.length) : '';
-    var inner = noColsNote + '<div class="rpt-wrap">' +
-      '<table class="rpt-table rpt-report"><thead>' + headRows(groups, lead) + '</thead>' +
+    var toolbar = '<div class="rpt-toolbar">' +
+      '<label class="rpt-toggle"><input type="checkbox" data-rpt-pct' + (showPct ? ' checked' : '') +
+      ' /><span>显示占比</span></label>' +
+      '<span class="rpt-hint">占比 = 该科目当期金额 ÷ 当期' + h(basisName) + '；数量、人数类科目不计算占比</span>' +
+      (showPct && !basisRow
+        ? '<span class="rpt-hint-warn">当前视图看不到' + h(basisName) + '，占比无法计算</span>' : '') +
+      '</div>';
+    var inner = noColsNote + toolbar + '<div class="rpt-wrap">' +
+      '<table class="rpt-table rpt-report"><thead>' + headRows(groups, lead, showPct) + '</thead>' +
       '<tbody>' + body + '</tbody></table></div>';
     el.innerHTML = rail
       ? '<div class="rpt-with-rail">' + rail + '<div class="rpt-rail-main">' + inner + '</div></div>'
@@ -507,11 +546,13 @@
       table.addEventListener('click', onClick);
     }
     var bound = bindRail(el, options);
+    var boundPct = bindPct(el, options);
 
     return {
       destroy: function () {
         if (table && onClick) table.removeEventListener('click', onClick);
         if (bound) bound.box.removeEventListener('change', bound.onChange);
+        if (boundPct) boundPct.box.removeEventListener('change', boundPct.onChange);
         el.innerHTML = '';
       }
     };
@@ -622,6 +663,9 @@
 
     var basisName = options.basisLabel || basis.name || '销售收入';
     var shownA = leadLevels(options.levels);
+    var showPct = options.showPct === true;
+    var basisRowA = findBasisRow(matrix);
+    var basisCellsA = basisRowA && basisRowA.cells ? basisRowA.cells : null;
     var head = '<tr>' +
       shownA.map(function (lv, idx) {
         return '<th class="rpt-lead rpt-th-corner" data-lead="' + idx + '" data-lv="' + lv + '">' +
@@ -629,7 +673,9 @@
       }).join('') +
       '<th class="rpt-lead rpt-lead-last rpt-th-corner" data-lead="' + shownA.length + '" data-lv="code">科目编码</th>' +
       cols.map(function (c) {
-        return '<th class="rpt-th-period">' + h(c.label || c.key) + '</th>';
+        var th = '<th class="rpt-th-period">' + h(c.label || c.key) + '</th>';
+        return showPct ? th + '<th class="rpt-th-period rpt-th-pct" title="' +
+          h((c.label || c.key) + ' 该科目金额 ÷ 同期' + basisName) + '">占比</th>' : th;
       }).join('') +
       '<th class="rpt-th-period rpt-th-total">总计</th>' +
       '<th class="rpt-th-period rpt-th-pct" title="该行合计 ÷ ' + h(basisName) + '合计">占' + h(basisName) + '</th>' +
@@ -656,7 +702,11 @@
       }
       for (var j = 0; j < 4; j++) lastPath[j] = pathArr[j] == null ? '' : pathArr[j];
 
-      var tds = cols.map(function (c) { return valueCell(cells[c.key], unit); }).join('');
+      var tds = cols.map(function (c) {
+        var valCell = valueCell(cells[c.key], unit);
+        if (!showPct) return valCell;
+        return valCell + pctCell(cells[c.key], unit, basisCellsA ? basisCellsA[c.key] : null);
+      }).join('');
 
       return '<tr data-code="' + h(row.code) + '" class="lv' + level + (row.hasData === false ? ' row-empty' : '') + '">' +
         pathTds +
@@ -672,7 +722,11 @@
       '合计 ' + h(formatCell(basis.total, 'money')) + (basis.found === false ? '（当前筛选下未取到该科目）' : '') + '</div>';
 
     var inner = '<div class="rpt-toolbar"><span class="rpt-count">经营分析报表</span>' +
-      '<span class="rpt-hint">行 = 科目（按勾选层级），列 = 月份；金额已按整数分累加</span></div>' +
+      '<label class="rpt-toggle"><input type="checkbox" data-rpt-pct' + (showPct ? ' checked' : '') +
+      ' /><span>显示占比</span></label>' +
+      '<span class="rpt-hint">行 = 科目（按勾选层级），列 = 月份；占比 = 该科目当期金额 ÷ 当期' + h(basisName) + '</span>' +
+      (showPct && !basisRowA ? '<span class="rpt-hint-warn">当前视图看不到' + h(basisName) + '，占比无法计算</span>' : '') +
+      '</div>' +
       '<div class="rpt-wrap"><table class="rpt-table rpt-analysis"><thead>' + head + '</thead>' +
       '<tbody>' + body + '</tbody></table></div>' + foot;
 
@@ -692,11 +746,13 @@
       table.addEventListener('click', onClick);
     }
     var bound = bindRail(el, options);
+    var boundPct = bindPct(el, options);
 
     return {
       destroy: function () {
         if (table && onClick) table.removeEventListener('click', onClick);
         if (bound) bound.box.removeEventListener('change', bound.onChange);
+        if (boundPct) boundPct.box.removeEventListener('change', boundPct.onChange);
         el.innerHTML = '';
       }
     };

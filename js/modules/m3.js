@@ -142,6 +142,8 @@
     if (!VIEWS[state.view]) state.view = 'chart';
     /* 层级勾选：旧看板没有该字段时默认全选四级，保证兼容 */
     state.levelFilter = normalizeLevelsInput(s.levelFilter);
+    /* 占比列：默认显示（参考《经营分析报表》版式），用户可随时关掉；旧看板同样默认开 */
+    state.showPct = s.showPct === false ? false : true;
     return state;
   }
 
@@ -691,7 +693,10 @@
       dimensions: f.dimensions,
       periodMode: f.periodMode || 'monthly',
       reportTemplateVersion: f.reportTemplateVersion || 'management-v1',
-      view: f.view || 'chart'
+      view: f.view || 'chart',
+      /* 层级勾选与占比开关都要随看板保存，否则重新打开会被默认值覆盖 */
+      levelFilter: Array.isArray(f.levelFilter) ? f.levelFilter.slice() : [1, 2, 3, 4],
+      showPct: f.showPct !== false
     }));
   }
 
@@ -856,6 +861,11 @@
       filters().levelFilter = normalizeLevelsInput(next);
       renderReportViews();
     };
+    const onPctChange = (next) => {
+      filters().showPct = !!next;
+      renderReportViews();
+    };
+    const showPct = filters().showPct !== false;
 
     /* ---- 经营分析报表：期间矩阵（行=科目，列=月份，含总计与占收入比） ---- */
     if (view === 'analysis') {
@@ -874,6 +884,8 @@
         reportHandle = window.PAReportView.renderAnalysis(bodyEl, pm, {
           levels,
           basisLabel: '销售收入',
+          showPct,
+          onPctChange,
           onLevelsChange
         });
       } else {
@@ -918,6 +930,8 @@
     if (window.PAReportView && window.PAReportView.renderReport) {
       reportHandle = window.PAReportView.renderReport(bodyEl, matrix, {
         levels,
+        showPct,
+        onPctChange,
         onLevelsChange
       });
     } else {

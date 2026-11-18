@@ -173,6 +173,33 @@ ok(row6602.indexOf('-30.00') > 0, '销售费用显示下级汇总 -30.00（父�
 dom = dump('report-lv12');
 ok(count(dom, '<tr data-code=') === 60, '勾一级+二级 = 60 行（实际 ' + count(dom, '<tr data-code=') + '）');
 
+/* ---------------- 11. 占比列（v0.13） ---------------- */
+console.log('\n[11] 占比列');
+function rowOf(d, code) { return (d.match(new RegExp('<tr data-code="' + code + '"[\\s\\S]*?</tr>')) || [''])[0]; }
+
+dom = dump('report');
+ok(count(dom, 'rpt-th-pct') === 3, '管报每个期间旁各有一个占比列（实际 ' + count(dom, 'rpt-th-pct') + '）');
+ok(/data-rpt-pct[^>]*checked/.test(dom), '占比开关默认开启');
+ok(dom.indexOf('显示占比') > 0, '工具条有「显示占比」勾选项');
+const r6001 = rowOf(dom, '6001');
+ok(r6001.indexOf('100.0%') > 0, '销售收入行占比 = 100.0%');
+const r6602 = rowOf(dom, '6602');
+ok(r6602.indexOf('-25.0%') > 0, '销售费用 -30 ÷ 120 = -25.0%');
+ok(/<td class="num pct neg"/.test(r6602) || r6602.indexOf('-25.0%') > 0, '负向占比带 neg 样式');
+
+dom = dump('pct-off');
+ok(count(dom, 'rpt-th-pct') === 0, '关掉开关后占比列消失（实际 ' + count(dom, 'rpt-th-pct') + '）');
+ok(count(dom, '<tr data-code=') === 211, '关掉占比不影响行数');
+
+dom = dump('pct-off-lv1');
+ok(count(dom, '<tr data-code=') === 21, '只勾一级 + 关占比：21 行');
+ok(count(dom, 'rpt-th-pct') === 0, '两个开关互不干扰');
+
+dom = dump('analysis');
+ok(count(dom, 'rpt-th-pct') >= 4, '经营分析每个月份旁也有占比列（含原有占销售收入列）');
+dom = dump('pct-off-analysis');
+ok(count(dom, 'rpt-th-pct') === 1, '关掉后只剩原有的「占销售收入」合计列（实际 ' + count(dom, 'rpt-th-pct') + '）');
+
 console.log('\n----------------------------------------');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 if (fail) { console.log('存在失败项'); process.exit(1); }

@@ -117,6 +117,25 @@
     if (act === 'levels-none') setLevels([], 'report');
     /* 只取消一级，其余保留：验证一级能真正取消 */
     if (act === 'levels-lv1-off') setLevels([2, 3, 4], 'report');
+    /* 占比列：默认开，点一次关掉 */
+    if (act === 'pct-off') {
+      acted.push(click('[data-view="report"]'));
+      var pcb = document.querySelector('[data-rpt-pct]');
+      acted.push(!!pcb && pcb.checked);
+      if (pcb && pcb.checked) pcb.click();
+    }
+    if (act === 'pct-off-analysis') {
+      acted.push(click('[data-view="analysis"]'));
+      var pcb2 = document.querySelector('[data-rpt-pct]');
+      acted.push(!!pcb2 && pcb2.checked);
+      if (pcb2 && pcb2.checked) pcb2.click();
+    }
+    /* 只勾一级 + 关占比：验证两个开关互不干扰 */
+    if (act === 'pct-off-lv1') {
+      setLevels([1], 'report');
+      var pcb3 = document.querySelector('[data-rpt-pct]');
+      if (pcb3 && pcb3.checked) pcb3.click();
+    }
     if (act === 'open-site') acted.push(click('[data-ms-trigger="site"]'));
     if (act === 'pick-first') {
       click('[data-ms-trigger="site"]');
