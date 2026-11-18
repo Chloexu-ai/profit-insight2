@@ -865,10 +865,50 @@
   /* 统一读取入口：同步返回「内部长表对象数组」。
      宽表数据集从缓存读（由 hydrateDatasets 预填充）；长表直接返回。
      若缓存未命中（极端时序），对明文宽表现场展开兜底。 */
+  /* 旧数据兼容：v0.12 之前导入的数据集没有 subject_code 字段，
+     而报表已改为「只按编码归集」，这些行会被全部跳过（表现为「该行没有可用的科目编码」刷屏 + 矩阵全 0）。
+     这里在读取时按「科目名称唯一匹配」补编码：
+       · 名称唯一 → 补上编码（不合并任何科目）
+       · 名称重名 / 注册表里没有 → 保持为空，交给校验照常报错，绝不猜
+     只补内存，不写回数据库；要彻底修好仍需重新导入带编码的表。 */
+  const _codeFilled = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+  P.backfillSubjectCodes = function (rows) {
+    const stats = { scanned: 0, filled: 0, ambiguous: 0, unknown: 0 };
+    const reg = P.reportRegistry();
+    if (!reg || !Array.isArray(rows)) return stats;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || typeof r !== 'object') continue;
+      stats.scanned++;
+      if (r.subject_code) continue;
+      const name = String(r.subject == null ? '' : r.subject).trim();
+      if (!name) continue;
+      const hits = reg.byName[name] || [];
+      if (hits.length === 1) {
+        r.subject_code = hits[0].code;
+        stats.filled++;
+      } else if (hits.length > 1) {
+        stats.ambiguous++;
+      } else {
+        stats.unknown++;
+      }
+    }
+    P.lastBackfill = stats;
+    return stats;
+  };
+
   P.datasetRows = function (ds) {
     if (!ds) return [];
     const store = ds.pa_store;
-    if (!store || store.kind !== 'wide') return Array.isArray(ds.rows_json) ? ds.rows_json : [];
+    if (!store || store.kind !== 'wide') {
+      const flat = Array.isArray(ds.rows_json) ? ds.rows_json : [];
+      /* 旧数据集没有 subject_code：读取时按名称唯一匹配补一次（结果缓存在 WeakSet，不重复扫） */
+      if (flat.length && _codeFilled && !_codeFilled.has(ds)) {
+        _codeFilled.add(ds);
+        P.backfillSubjectCodes(flat);
+      }
+      return flat;
+    }
     let cached = _wideExpandCache.get(ds);
     if (cached) return cached;
     /* 兜底：明文宽表现场展开（压缩数据必须已 hydrate，此处无法同步解压） */

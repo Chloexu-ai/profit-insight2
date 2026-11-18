@@ -212,6 +212,25 @@ if (typeof P.cleanRows === 'function') {
   fail++; console.log('  FAIL js/core.js 未提供 cleanRows');
 }
 
+/* ---------------- 旧数据补编码（v0.13.1：存量数据没有 subject_code） ---------------- */
+if (P.backfillSubjectCodes && P.reportRegistry()) {
+  const legacy = [
+    { subject: '销售收入', amount: 1 },
+    { subject: '平台佣金', amount: 2 },
+    { subject: '并不存在的科目', amount: 3 },
+    { subject: '销售收入', subject_code: '6001', amount: 4 }
+  ];
+  const st = P.backfillSubjectCodes(legacy);
+  eq(st.filled, 1, '名称唯一 → 只补 1 行');
+  eq(legacy[0].subject_code, '6001', '销售收入按名称补到 6001');
+  eq(st.ambiguous, 1, '重名科目计入歧义，不猜');
+  ok(!legacy[1].subject_code, '平台佣金 保持空编码（不猜）');
+  eq(st.unknown, 1, '注册表里没有的名称计入未知');
+  ok(!legacy[2].subject_code, '未知名称不写编码');
+  eq(legacy[3].subject_code, '6001', '已有编码的行不受影响');
+  eq(legacy[3].amount, 4, '补码不改动金额');
+}
+
 /* ---------------- 数据视图权限（不得随模板换版而放宽） ---------------- */
 if (P.visibleSubjectCodes) {
   const savedView = P.state.dataView, savedRole = P.state.role;
