@@ -112,21 +112,33 @@
 
   /* 固定列定位校准：按表头实际宽度重算 left，避免长科目名把列宽撑偏后错位。
      纯几何测量，不涉及任何数值计算；测量失败（隐藏容器）时保留 CSS 默认值。 */
+  /* 固定列左偏移：
+     1) data-lead 序号（管报/经营分析按实际渲染的科目列动态测量，列数可变）；
+     2) 旧的 rpt-sticky-N 类（月度矩阵仍用，列数固定）。 */
   function syncSticky(table) {
     if (!table || typeof table.querySelectorAll !== 'function') return;
     var heads = table.querySelectorAll('thead th');
     var lefts = [];
+    var leadLefts = [];
     var offset = 0;
     Array.prototype.forEach.call(heads, function (th) {
-      var m = /rpt-sticky-(\d)/.exec(th.className || '');
-      if (!m) return;
+      var cls = th.className || '';
+      var lead = th.getAttribute ? th.getAttribute('data-lead') : null;
+      var m = /rpt-sticky-(\d)/.exec(cls);
+      if (lead == null && !m) return;
       var w = th.getBoundingClientRect ? th.getBoundingClientRect().width : (th.offsetWidth || 0);
-      lefts[Number(m[1]) - 1] = offset;
+      if (lead != null) leadLefts[Number(lead)] = offset;
+      if (m) lefts[Number(m[1]) - 1] = offset;
       offset += w || 0;
     });
     if (!offset) return;
-    var cells = table.querySelectorAll('[class*="rpt-sticky-"]');
+    var cells = table.querySelectorAll('[data-lead], [class*="rpt-sticky-"]');
     Array.prototype.forEach.call(cells, function (cell) {
+      var lead = cell.getAttribute ? cell.getAttribute('data-lead') : null;
+      if (lead != null) {
+        if (leadLefts[Number(lead)] != null) cell.style.left = leadLefts[Number(lead)] + 'px';
+        return;
+      }
       var m = /rpt-sticky-(\d)/.exec(cell.className || '');
       if (m && lefts[Number(m[1]) - 1] != null) cell.style.left = lefts[Number(m[1]) - 1] + 'px';
     });
@@ -413,7 +425,10 @@
     var columns = Array.isArray(matrix.columns) ? matrix.columns : [];
 
     if (!rows.length) {
-      var tip0 = emptyBox('当前层级与筛选条件下没有可生成的管报数据，请在左侧勾选要显示的层级');
+      var noLevel = Array.isArray(options.levels) && !options.levels.length;
+      var tip0 = emptyBox(noLevel
+        ? '未勾选任何科目层级，报表为空白。请在左侧勾选要显示的层级。'
+        : '当前层级与筛选条件下没有可生成的管报数据，请在左侧调整勾选的层级');
       var rail0 = Array.isArray(options.levels) ? levelRailHtml(options.levels, 0) : '';
       el.innerHTML = rail0
         ? '<div class="rpt-with-rail">' + rail0 + '<div class="rpt-rail-main">' + tip0 + '</div></div>'
@@ -428,11 +443,13 @@
       ' 行全部为 0。因未指定月份且数据中没有可识别的期间，未生成月份列。</div>';
 
     var groups = groupColumns(columns);
-    var lead = '<th class="rpt-sticky-1 rpt-th-corner" rowspan="2">一级科目</th>' +
-      '<th class="rpt-sticky-2 rpt-th-corner" rowspan="2">二级科目</th>' +
-      '<th class="rpt-sticky-3 rpt-th-corner" rowspan="2">三级科目</th>' +
-      '<th class="rpt-sticky-4 rpt-th-corner" rowspan="2">四级科目</th>' +
-      '<th class="rpt-sticky-5 rpt-th-corner" rowspan="2">科目编码</th>';
+    var shown = leadLevels(options.levels);
+    var lead = shown.map(function (lv, idx) {
+      return '<th class="rpt-lead rpt-th-corner" data-lead="' + idx + '" data-lv="' + lv +
+        '" rowspan="2">' + LEVEL_LABEL[lv - 1] + '</th>';
+    }).join('') +
+      '<th class="rpt-lead rpt-lead-last rpt-th-corner" data-lead="' + shown.length +
+      '" data-lv="code" rowspan="2">科目编码</th>';
 
     /* 严格按 matrix.rows 顺序输出：不重排、不过滤、不合并同名行 */
     var lastPath = ['', '', '', ''];
@@ -446,12 +463,13 @@
       /* 与上一行同祖先的层级留空，视觉上模拟 Excel 合并单元格；数值不受影响 */
       var pathTds = '';
       var sameAncestor = true;
-      for (var i = 0; i < 4; i++) {
+      for (var i = 0; i < shown.length; i++) {
         var raw = pathArr[i] == null ? '' : pathArr[i];
         var show = raw;
         if (raw && sameAncestor && raw === lastPath[i]) show = '';
         else if (raw) sameAncestor = false;
-        pathTds += '<td class="rpt-sticky-' + (i + 1) + ' rpt-subject lv' + (i + 1) + '" title="' + h(fullPath) + '">' +
+        pathTds += '<td class="rpt-lead rpt-subject lv' + (i + 1) + '" data-lead="' + i +
+          '" data-lv="' + (i + 1) + '" title="' + h(fullPath) + '">' +
           (show ? '<div class="rpt-cell">' + h(show) + '</div>' : '') + '</td>';
       }
       for (var j = 0; j < 4; j++) lastPath[j] = pathArr[j] == null ? '' : pathArr[j];
@@ -462,7 +480,8 @@
 
       return '<tr data-code="' + h(row.code) + '" class="lv' + level + (row.hasData === false ? ' row-empty' : '') + '">' +
         pathTds +
-        '<td class="rpt-sticky-5 rpt-code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
+        '<td class="rpt-lead rpt-lead-last rpt-code" data-lead="' + shown.length +
+        '" data-lv="code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
         tds + '</tr>';
     }).join('');
 
@@ -502,52 +521,56 @@
 
   var LEVEL_LABEL = ['一级科目', '二级科目', '三级科目', '四级科目'];
 
-  /* 层级勾选栏：勾一级=只看一级汇总；再勾二级=一级汇总 + 二级明细 */
+  /* 勾选层级 → 实际要渲染的科目列（1..最高勾选级）。
+     列由最高勾选级决定：勾二级就只出「一级+二级」两列，三级四级列隐藏，
+     这样既遵守「只展示选中级别」的要求，又不至于让下级科目看不出上级归属。 */
+  function leadLevels(levels) {
+    if (!Array.isArray(levels)) return [1, 2, 3, 4];
+    var max = 0;
+    levels.forEach(function (lv) {
+      var n = Math.round(Number(lv));
+      if (n >= 1 && n <= 4 && n > max) max = n;
+    });
+    if (!max) return [];
+    var out = [];
+    for (var i = 1; i <= max; i++) out.push(i);
+    return out;
+  }
+
+  /* 层级勾选栏：四个层级各自独立，可勾可取消；全不勾时报表为空白 */
   function levelRailHtml(levels, rowCount) {
-    var on = Array.isArray(levels) && levels.length ? levels : [1, 2, 3, 4];
+    var on = Array.isArray(levels) ? levels : [1, 2, 3, 4];
     var items = LEVEL_LABEL.map(function (name, i) {
       var lv = i + 1;
       return '<label class="rpt-lv-item"><input type="checkbox" data-rpt-level="' + lv + '"' +
         (on.indexOf(lv) >= 0 ? ' checked' : '') + ' /><span>' + name + '</span></label>';
     }).join('');
+    var cols = leadLevels(on);
+    var hint = !on.length
+      ? '未勾选任何层级，报表为空。'
+      : (cols.length < 4 ? '表格只显示到' + LEVEL_LABEL[cols.length - 1] + '，更低的层级列已隐藏。' : '');
     return '<aside class="rpt-rail">' +
       '<div class="rpt-rail-title">显示层级</div>' + items +
       '<div class="rpt-rail-count">' + (rowCount == null ? '' : '共 ' + rowCount + ' 行') + '</div>' +
-      '<div class="rpt-rail-note">勾选第 N 级会自动同时显示它上面的各级，避免同一层级里重名科目分不清。<br/>只勾一级＝只看一级汇总。</div>' +
-      '</aside>';
+      '<div class="rpt-rail-note">四个层级可分别勾选或取消。<br/>' +
+      '只看某一级时，它上面的层级列会自动保留，方便定位归属。' +
+      (hint ? '<br/>' + hint : '') +
+      '</div></aside>';
   }
 
-  /* 绑定层级变化：勾低层级时自动带上更高层级（1..N 连续），只上报不自算 */
+  /* 绑定层级变化：每个复选框独立上报，不做 1..N 强制补选 */
   function bindRail(el, options) {
     var box = el ? el.querySelector('.rpt-rail') : null;
     if (!box || typeof options.onLevelsChange !== 'function') return null;
 
-    var boxes = function () {
-      return Array.prototype.slice.call(box.querySelectorAll('input[data-rpt-level]'));
-    };
-    var applyPrefix = function (max) {
-      /* 立即回填勾选态，避免等整块重绘才有反应 */
-      boxes().forEach(function (cb) {
-        cb.checked = Number(cb.getAttribute('data-rpt-level')) <= max;
-      });
-    };
-
     var onChange = function (e) {
       var t = e.target;
+      if (!t || !t.getAttribute || t.getAttribute('data-rpt-level') == null) return;
       var picked = [];
-      var lv = t && t.getAttribute ? Number(t.getAttribute('data-rpt-level')) : 0;
-      if (lv >= 1 && lv <= 4) {
-        /* 勾选第 N 级 → 1..N 全选；取消第 N 级 → 收缩到 1..N-1 */
-        var max = t.checked ? lv : lv - 1;
-        for (var i = 1; i <= max; i++) picked.push(i);
-        applyPrefix(max);
-      } else {
-        var top = 0;
-        boxes().forEach(function (cb) {
-          if (cb.checked) top = Math.max(top, Number(cb.getAttribute('data-rpt-level')));
-        });
-        for (var j = 1; j <= top; j++) picked.push(j);
-      }
+      Array.prototype.forEach.call(box.querySelectorAll('input[data-rpt-level]'), function (cb) {
+        if (cb.checked) picked.push(Number(cb.getAttribute('data-rpt-level')));
+      });
+      picked.sort(function (a, b) { return a - b; });
       options.onLevelsChange(picked);
     };
     box.addEventListener('change', onChange);
@@ -586,7 +609,10 @@
     var rail = Array.isArray(options.levels) ? levelRailHtml(options.levels, rows.length) : '';
 
     if (!rows.length) {
-      var tip = '<div class="empty">当前层级与筛选条件下没有可展示的科目行，请在左侧勾选要显示的层级。</div>';
+      var noLevel2 = Array.isArray(options.levels) && !options.levels.length;
+      var tip = '<div class="empty">' + (noLevel2
+        ? '未勾选任何科目层级，报表为空白。请在左侧勾选要显示的层级。'
+        : '当前层级与筛选条件下没有可展示的科目行，请在左侧调整勾选的层级。') + '</div>';
       el.innerHTML = rail ? '<div class="rpt-with-rail">' + rail + '<div class="rpt-rail-main">' + tip + '</div></div>' : tip;
       var b0 = bindRail(el, options);
       return {
@@ -595,12 +621,13 @@
     }
 
     var basisName = options.basisLabel || basis.name || '销售收入';
+    var shownA = leadLevels(options.levels);
     var head = '<tr>' +
-      '<th class="rpt-sticky-1 rpt-th-corner">一级科目</th>' +
-      '<th class="rpt-sticky-2 rpt-th-corner">二级科目</th>' +
-      '<th class="rpt-sticky-3 rpt-th-corner">三级科目</th>' +
-      '<th class="rpt-sticky-4 rpt-th-corner">四级科目</th>' +
-      '<th class="rpt-sticky-5 rpt-th-corner">科目编码</th>' +
+      shownA.map(function (lv, idx) {
+        return '<th class="rpt-lead rpt-th-corner" data-lead="' + idx + '" data-lv="' + lv + '">' +
+          LEVEL_LABEL[lv - 1] + '</th>';
+      }).join('') +
+      '<th class="rpt-lead rpt-lead-last rpt-th-corner" data-lead="' + shownA.length + '" data-lv="code">科目编码</th>' +
       cols.map(function (c) {
         return '<th class="rpt-th-period">' + h(c.label || c.key) + '</th>';
       }).join('') +
@@ -618,12 +645,13 @@
 
       var pathTds = '';
       var sameAncestor = true;
-      for (var i = 0; i < 4; i++) {
+      for (var i = 0; i < shownA.length; i++) {
         var raw = pathArr[i] == null ? '' : pathArr[i];
         var show = raw;
         if (raw && sameAncestor && raw === lastPath[i]) show = '';
         else if (raw) sameAncestor = false;
-        pathTds += '<td class="rpt-sticky-' + (i + 1) + ' rpt-subject lv' + (i + 1) + '" title="' + h(fullPath) + '">' +
+        pathTds += '<td class="rpt-lead rpt-subject lv' + (i + 1) + '" data-lead="' + i +
+          '" data-lv="' + (i + 1) + '" title="' + h(fullPath) + '">' +
           (show ? '<div class="rpt-cell">' + h(show) + '</div>' : '') + '</td>';
       }
       for (var j = 0; j < 4; j++) lastPath[j] = pathArr[j] == null ? '' : pathArr[j];
@@ -632,7 +660,8 @@
 
       return '<tr data-code="' + h(row.code) + '" class="lv' + level + (row.hasData === false ? ' row-empty' : '') + '">' +
         pathTds +
-        '<td class="rpt-sticky-5 rpt-code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
+        '<td class="rpt-lead rpt-lead-last rpt-code" data-lead="' + shownA.length +
+        '" data-lv="code" title="' + h(row.code) + '">' + h(row.code) + '</td>' +
         tds +
         '<td class="' + numClass(toNumber(row.total)) + ' rpt-total">' + h(formatCell(row.total, unit)) + '</td>' +
         pctCell(row.total, unit, basis.total) +

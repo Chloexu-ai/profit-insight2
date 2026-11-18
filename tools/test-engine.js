@@ -581,9 +581,28 @@ t('levels 支持字符串与非法值', function () {
   eq(m.rows.map(function (r) { return r.code; }), ['6602010101'], '只保留四级行');
 });
 
-t('levels=[] 视为不限制', function () {
+t('levels=[] 表示一个都没勾 → 0 行，且不退回「全部」', function () {
   const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { levels: [] } });
-  eq(m.rows.length, 5);
+  eq(m.rows.length, 0, '空数组不得被当成不限制');
+  ok(m.meta.note.indexOf('未勾选任何科目层级') >= 0, 'meta.note 说明未勾选层级');
+});
+
+t('levels 未传（undefined/null）才是「不限制」', function () {
+  const m1 = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: {} });
+  eq(m1.rows.length, 5);
+  const m2 = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { levels: null } });
+  eq(m2.rows.length, 5);
+});
+
+t('levels 只勾二级 → 只出二级行（不自动补一级）', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { subjectRule: 'rollup', levels: [2] } });
+  eq(m.rows.map(function (r) { return r.code; }), ['660201', '660101']);
+  eq(cell(m, '660201', '2026-01'), 150, '二级仍是含下级汇总值');
+});
+
+t('levels 勾 1 和 3（跳过 2）→ 只出 1、3 级', function () {
+  const m = R.buildMonthlyMatrix({ facts: RF, template: RT, rules: { levels: [1, 3] } });
+  eq(m.rows.map(function (r) { return r.code; }), ['6602', '6601']);
 });
 
 t('rollup 下负数仍保留符号', function () {

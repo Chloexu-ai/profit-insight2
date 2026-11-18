@@ -458,6 +458,9 @@
   /* 层级入参归一：接受 [1,2] 或 '1,2' 或 1；空/非法返回 null（= 不限制层级）。
      只认 1~4，且去重排序，避免调用方传脏数据导致行全被过滤掉。 */
   function normalizeLevels(raw) {
+    /* null / undefined = 调用方没有限制层级（全部显示）
+       显式给了数组（含空数组）= 只显示这些层级；空数组表示「一个都没勾」，结果必须为空，
+       不能退化成「全部」——这是 v0.12.2 修的「一级取消不掉」的根因之一。 */
     if (raw == null) return null;
     let arr;
     if (Array.isArray(raw)) arr = raw.slice();
@@ -472,7 +475,6 @@
       if (out.indexOf(lv) >= 0) continue;
       out.push(lv);
     }
-    if (!out.length) return null;
     out.sort(function (a, b) { return a - b; });
     return out;
   }
@@ -793,8 +795,10 @@
     if (skippedSubject > 0) notes.push(skippedSubject + ' 行科目无法归集被跳过，详见 diagnostics。');
     if (ruleIgnored) notes.push('不支持的归集规则已回退为 direct。');
     if (useRollup) notes.push('口径：父级科目含其下同单位子科目的汇总值（不含「人数」等不同单位明细）。');
-    if (levelFilter) notes.push('已按层级筛选：仅显示 ' + levelFilter.map(function (l) { return ['一', '二', '三', '四'][l - 1] + '级'; }).join('、') + ' 科目。');
-    if (!rows.length) notes.push('当前层级与数据权限过滤后没有任何科目行。');
+    const noLevel = !!(levelFilter && !levelFilter.length);
+    if (noLevel) notes.push('未勾选任何科目层级，报表为空。');
+    else if (levelFilter) notes.push('已按层级筛选：仅显示 ' + levelFilter.map(function (l) { return ['一', '二', '三', '四'][l - 1] + '级'; }).join('、') + ' 科目。');
+    if (!rows.length && !noLevel) notes.push('当前层级与数据权限过滤后没有任何科目行。');
 
     return {
       columns: columns,
@@ -892,6 +896,7 @@
     return {
       columns: periods,
       rows: rows,
+      diagnostics: [],
       basis: {
         code: basisCode,
         name: basisRow ? basisRow.name : '',

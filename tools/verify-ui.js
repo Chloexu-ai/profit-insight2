@@ -106,20 +106,50 @@ ok(count(dom, '<tr') >= 210, '无匹配数据仍渲染 211 行（实际 ' + coun
 ok(dom.indexOf('未生成月份列') > 0, '说明为什么没有月份列');
 ok(dom.indexOf('全部为 0') > 0, '说明模板行全部为 0');
 
-/* ---------------- 8.1 层级联动：勾低级自动带高级（v0.12.1） ---------------- */
-console.log('\n[8.1] 层级联动');
+/* ---------------- 8.1 层级独立勾选 + 列随层级收窄（v0.12.2） ---------------- */
+console.log('\n[8.1] 层级独立勾选与列收窄');
+function leadCols(d) { return count(d, '<th class="rpt-lead'); }
+function checkedLevels(d) {
+  const out = [];
+  [1, 2, 3, 4].forEach((lv) => {
+    if (d.indexOf('data-rpt-level="' + lv + '" checked') >= 0) out.push(lv);
+  });
+  return out.join(',');
+}
+
+dom = dump('report');
+ok(checkedLevels(dom) === '1,2,3,4', '默认四级全选（实际 ' + checkedLevels(dom) + '）');
+ok(leadCols(dom) === 5, '四级全选 → 4 个科目列 + 编码列（实际 ' + leadCols(dom) + '）');
+
+dom = dump('levels-only2');
+ok(checkedLevels(dom) === '2', '只勾二级时其他层级确实取消（实际 ' + checkedLevels(dom) + '）');
+ok(count(dom, '<tr data-code=') === 39, '只勾二级 = 39 行（实际 ' + count(dom, '<tr data-code=') + '）');
+ok(leadCols(dom) === 3, '只勾二级 → 一级列 + 二级列 + 编码列，三四级列隐藏（实际 ' + leadCols(dom) + '）');
+ok(dom.indexOf('三级科目</th>') < 0 && dom.indexOf('四级科目</th>') < 0, '三级/四级表头不再出现');
+ok(dom.indexOf('一级科目</th>') > 0, '上级（一级）列仍保留，便于定位归属');
+
 dom = dump('report-lv3');
-ok(count(dom, '<tr data-code=') === 116, '只勾三级 → 自动带上一二级，共 116 行（实际 ' + count(dom, '<tr data-code=') + '）');
-ok(dom.indexOf('data-rpt-level="1" checked') > 0, '一级被自动勾选');
-ok(dom.indexOf('data-rpt-level="2" checked') > 0, '二级被自动勾选');
-ok(dom.indexOf('data-rpt-level="3" checked') > 0, '三级保持勾选');
-ok(dom.indexOf('data-rpt-level="4" checked') < 0, '四级未被勾选');
-dom = dump('report-uncheck2');
-ok(count(dom, '<tr data-code=') === 21, '取消二级后只剩一级 21 行（实际 ' + count(dom, '<tr data-code=') + '）');
-ok(dom.indexOf('data-rpt-level="2" checked') < 0, '二级已取消');
+ok(checkedLevels(dom) === '3', '只勾三级，一级可以真正取消（实际 ' + checkedLevels(dom) + '）');
+ok(count(dom, '<tr data-code=') === 56, '只勾三级 = 56 行（实际 ' + count(dom, '<tr data-code=') + '）');
+ok(leadCols(dom) === 4, '只勾三级 → 科目列显示到三级 + 编码列（实际 ' + leadCols(dom) + '）');
+
+dom = dump('levels-lv1-off');
+ok(checkedLevels(dom) === '2,3,4', '只取消一级，其余保持（实际 ' + checkedLevels(dom) + '）');
+ok(count(dom, '<tr data-code=') === 190, '取消一级后剩 190 行（实际 ' + count(dom, '<tr data-code=') + '）');
+
+dom = dump('levels-none');
+ok(checkedLevels(dom) === '', '四个层级可以全部取消');
+ok(count(dom, '<tr data-code=') === 0, '全不勾 → 没有科目行（实际 ' + count(dom, '<tr data-code=') + '）');
+ok(dom.indexOf('未勾选任何科目层级') > 0, '空白界面给出未勾选提示');
+ok(count(dom, 'rpt-lv-item') === 4, '空白态下勾选栏仍可见，可重新勾上');
 
 /* ---------------- 9. 经营分析报表（v0.12） ---------------- */
 console.log('\n[9] 经营分析报表');
+dom = dump('analysis-only2');
+ok(count(dom, '<tr data-code=') === 39, '经营分析只勾二级 = 39 行（实际 ' + count(dom, '<tr data-code=') + '）');
+ok(count(dom, '<th class="rpt-lead') === 3, '经营分析只勾二级 → 两列科目 + 编码（实际 ' + count(dom, '<th class="rpt-lead') + '）');
+ok(dom.indexOf('只显示到二级科目') > 0, '勾选栏提示列只显示到二级');
+
 dom = dump('analysis');
 ok(dom.indexOf('rpt-analysis') > 0, '经营分析表格已渲染');
 ok(count(dom, 'rpt-lv-item') === 4, '左侧层级勾选栏有 4 个选项');

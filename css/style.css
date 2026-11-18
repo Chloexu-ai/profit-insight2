@@ -364,3 +364,31 @@ label.field-label { display: block; font-size: 12px; color: var(--text-soft); ma
 .rpt-table td.num.pct { color: var(--text-soft); }
 .rpt-table td.num.pct.neg { color: var(--down); }
 .rpt-foot { margin-top: 8px; font-size: 12px; color: var(--text-mute); }
+
+/* ===== v0.12.2 科目列按勾选层级动态显示 =====
+   管报/经营分析的科目列不再是固定 4 列：勾到第 N 级就只渲染 1..N 级 + 编码列。
+   宽度用 data-lv 精准指定，左偏移由 view.js 的 syncSticky 按实际列宽测量后写入。 */
+.rpt-table .rpt-lead { position: sticky; z-index: 2; background: #fff;
+  border-right: 1px solid var(--line); }
+.rpt-table thead th.rpt-lead { z-index: 4; }
+.rpt-table .rpt-lead-last { box-shadow: 6px 0 8px -6px rgba(16,24,40,.14); }
+
+.rpt-report .rpt-lead[data-lv="1"] { width: 170px; min-width: 170px; max-width: 170px; }
+.rpt-report .rpt-lead[data-lv="2"] { width: 160px; min-width: 160px; max-width: 160px; }
+.rpt-report .rpt-lead[data-lv="3"] { width: 160px; min-width: 160px; max-width: 160px; }
+.rpt-report .rpt-lead[data-lv="4"] { width: 190px; min-width: 190px; max-width: 190px; }
+.rpt-report .rpt-lead[data-lv="code"] { width: 96px; min-width: 96px; max-width: 96px; }
+.rpt-report .rpt-lead[data-lv="1"] .rpt-cell { max-width: 148px; }
+.rpt-report .rpt-lead[data-lv="2"] .rpt-cell,
+.rpt-report .rpt-lead[data-lv="3"] .rpt-cell { max-width: 138px; }
+.rpt-report .rpt-lead[data-lv="4"] .rpt-cell { max-width: 168px; }
+
+.rpt-analysis .rpt-lead[data-lv="1"] { width: 148px; min-width: 148px; max-width: 148px; }
+.rpt-analysis .rpt-lead[data-lv="2"] { width: 126px; min-width: 126px; max-width: 126px; }
+.rpt-analysis .rpt-lead[data-lv="3"] { width: 126px; min-width: 126px; max-width: 126px; }
+.rpt-analysis .rpt-lead[data-lv="4"] { width: 148px; min-width: 148px; max-width: 148px; }
+.rpt-analysis .rpt-lead[data-lv="code"] { width: 92px; min-width: 92px; max-width: 92px; }
+.rpt-analysis .rpt-lead[data-lv="1"] .rpt-cell { max-width: 126px; }
+.rpt-analysis .rpt-lead[data-lv="2"] .rpt-cell,
+.rpt-analysis .rpt-lead[data-lv="3"] .rpt-cell { max-width: 104px; }
+.rpt-analysis .rpt-lead[data-lv="4"] .rpt-cell { max-width: 126px; }
